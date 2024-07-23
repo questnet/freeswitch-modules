@@ -177,17 +177,21 @@ switch_status_t google_speech_session_cleanup(switch_core_session_t *session, in
 
 			delete streamer;
 			cb->streamer = NULL;
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "google_speech_session_cleanup:  GStreamer deleted\n");
 		}
 
 		if (cb->resampler) {
 			speex_resampler_destroy(cb->resampler);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "google_speech_session_cleanup: Resampler deleted\n");
 		}
 		if (cb->vad) {
 			switch_vad_destroy(&cb->vad);
 			cb->vad = nullptr;
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "google_speech_session_cleanup: VAD destroyed\n");
 		}
 		if (!channelIsClosing) {
 			switch_core_media_bug_remove(session, &bug);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "google_speech_session_cleanup: Media bug removed\n");
 		}
 
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "google_speech_session_cleanup: Closed stream\n");
