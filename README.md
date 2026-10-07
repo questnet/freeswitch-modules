@@ -1,6 +1,6 @@
 # freeswitch-modules
 
-A collection of Freeswitch modules intended for use with a [jambonz](https://jambonz.org) programmable voice platform deployment.
+The `mod_audio_fork` Freeswitch module, intended for use with a [jambonz](https://jambonz.org) programmable voice platform deployment.
 
 ## Licensing
 
