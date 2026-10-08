@@ -47,10 +47,10 @@ RUN set -eux; \
     mkdir -p /tmp/obj; \
     gcc -c -Wall $FS_INC $(pkg-config --cflags libwebsockets) mod_audio_fork.c -o /tmp/obj/mod_audio_fork.o; \
     for f in lws_glue parser audio_pipe vector_math; do \
-      g++ -c -Wall -std=c++11 $SIMDFLAGS $FS_INC $(pkg-config --cflags libwebsockets) $f.cpp -o /tmp/obj/$f.o; \
+      g++ -c -Wall -std=c++17 $SIMDFLAGS $FS_INC $(pkg-config --cflags libwebsockets) $f.cpp -o /tmp/obj/$f.o; \
     done
 
 # Unit tests (link only vector_math + base64, no FreeSWITCH)
 RUN set -eux; \
-    g++ -Wall -std=c++11 $(cat /tmp/simdflags) -I. test/test_units.cpp vector_math.cpp -o /tmp/test_units; \
+    g++ -Wall -std=c++17 $(cat /tmp/simdflags) -I. test/test_units.cpp vector_math.cpp -o /tmp/test_units; \
     /tmp/test_units
