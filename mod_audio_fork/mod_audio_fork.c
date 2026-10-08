@@ -198,7 +198,7 @@ SWITCH_STANDARD_API(fork_function)
 
 
 	if (zstr(cmd) || argc < 2 ||
-		(0 == strcmp(argv[1], "start") && argc < 4)) {
+		(0 == strcmp(argv[1], "start") && argc < 5)) {  /* start needs <uuid> start <url> <mix> <rate> */
 
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error with command %s %s %s.\n", cmd, argv[0], argv[1]);
 		stream->write_function(stream, "-USAGE: %s\n", FORK_API_SYNTAX);
