@@ -1,0 +1,23 @@
+name: qa
+
+on:
+  push:
+  pull_request:
+
+# a new push to the same branch or PR cancels the runs still in progress
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # the two configurations of `just test-all`: scalar vector math, and SSE2 (runners are linux/amd64)
+        target: [test, test-sse2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - run: just ${{ matrix.target }}
