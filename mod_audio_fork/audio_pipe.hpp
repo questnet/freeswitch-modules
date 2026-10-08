@@ -148,6 +148,7 @@ namespace drachtio {
     }
 
     std::atomic<LwsState_t> m_state;
+    std::atomic<bool> m_closeRequested{false};
     std::string m_uuid;
     std::string m_host;
     std::string m_bugname;

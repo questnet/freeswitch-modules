@@ -20,4 +20,5 @@ switch_bool_t fork_frame(switch_core_session_t *session, switch_media_bug_t *bug
 switch_bool_t dub_speech_frame(switch_media_bug_t *bug, private_t * tech_pvt);
 switch_status_t fork_service_threads();
 switch_status_t fork_session_connect(void **ppUserData);
+void fork_session_destroy(void **ppUserData);
 #endif

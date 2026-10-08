@@ -562,6 +562,13 @@ extern "C" {
     return SWITCH_STATUS_SUCCESS;
   }
 
+  // for a session that was initialised but never got as far as having a media bug (or a connection) to clean up
+  void fork_session_destroy(void **ppUserData) {
+    private_t *tech_pvt = static_cast<private_t *>(*ppUserData);
+    if (tech_pvt) destroy_tech_pvt(tech_pvt);
+    *ppUserData = nullptr;
+  }
+
    switch_status_t fork_session_connect(void **ppUserData) {
     private_t *tech_pvt = static_cast<private_t *>(*ppUserData);
     drachtio::AudioPipe *pAudioPipe = PipeHandle::get(tech_pvt);

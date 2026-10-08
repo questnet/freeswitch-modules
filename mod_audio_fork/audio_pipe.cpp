@@ -115,6 +115,13 @@ int AudioPipe::lws_callback(struct lws *wsi,
             ap->m_state = LWS_CLIENT_CONNECTED;
             if (!ap->m_text_queue.empty()) lws_callback_on_writable(wsi);
           }
+          // close() was called while we were connecting and found nothing to close: do it now. Returning -1
+          // closes the connection, LWS_CALLBACK_CLIENT_CLOSED follows. Either this sees the flag or close()
+          // sees CONNECTED and queues a disconnect, so the connection never stays open unnoticed.
+          if (ap->m_closeRequested) {
+            ap->m_state = LWS_CLIENT_DISCONNECTING;
+            return -1;
+          }
           ap->notify(AudioPipe::CONNECT_SUCCESS, NULL, NULL, len);
         }
         else {
@@ -319,15 +326,24 @@ void AudioPipe::processPendingConnects(lws_per_vhost_data *vhd) {
   {
     std::lock_guard<std::mutex> guard(mutex_connects);
     for (auto it = pendingConnects.begin(); it != pendingConnects.end(); ++it) {
-      if ((*it)->m_state == LWS_CLIENT_IDLE) {
-        connects.push_back(*it);
-        (*it)->m_state = LWS_CLIENT_CONNECTING;
-      }
+      // atomic, so a close() that wins the race (IDLE -> DISCONNECTED) is never connected
+      LwsState_t expected = LWS_CLIENT_IDLE;
+      if ((*it)->m_state.compare_exchange_strong(expected, LWS_CLIENT_CONNECTING)) connects.push_back(*it);
     }
+    // drop pipes that were closed before they got to connect
+    pendingConnects.remove_if([](const Ptr& p) { return p->m_state == LWS_CLIENT_DISCONNECTED; });
   }
   for (auto it = connects.begin(); it != connects.end(); ++it) {
     Ptr ap = *it;
-    ap->connect_client(vhd);   
+    if (!ap->connect_client(vhd)) {
+      switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,"%s unable to start connection\n", ap->m_uuid.c_str());
+      {
+        std::lock_guard<std::mutex> guard(mutex_connects);
+        pendingConnects.remove(ap);
+      }
+      ap->m_state = LWS_CLIENT_FAILED;
+      ap->notify(AudioPipe::CONNECT_FAIL, "unable to start connection", NULL, 0);
+    }
   }
 }
 
@@ -572,8 +588,12 @@ void AudioPipe::unlockAudioBuffer() {
 }
 
 void AudioPipe::close() {
+  // set first: a connection that is still being established is closed by the lws thread once it is up
+  m_closeRequested = true;
   // atomic, so a connection closed concurrently by the lws thread is never moved back to DISCONNECTING
-  LwsState_t expected = LWS_CLIENT_CONNECTED;
+  LwsState_t expected = LWS_CLIENT_IDLE;
+  if (m_state.compare_exchange_strong(expected, LWS_CLIENT_DISCONNECTED)) return;  // never connected
+  expected = LWS_CLIENT_CONNECTED;
   if (!m_state.compare_exchange_strong(expected, LWS_CLIENT_DISCONNECTING)) return;
   addPendingDisconnect(shared_from_this());
 }
