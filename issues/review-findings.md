@@ -11,6 +11,7 @@ Status is kept up to date as items are fixed. Items not touched since the origin
 - [x] **`AudioPipe::context` / `stopFlag` data races.** Both atomic and documented in `audio_pipe.hpp`; `addPendingConnect` skips `lws_cancel_service` while the context does not exist yet, and the service thread wakes itself once it has created it.
 - [x] **Removed `playAudio` and `transcription`** (messages, events, README). The `playAudio` temp-file list and its races went with it. `killAudio` is kept.
 - [x] **Leaks / sockets left open.** `close()` on a pipe that is `IDLE` or `CONNECTING` is remembered (`m_closeRequested`) and honoured: an `IDLE` pipe never connects, a `CONNECTING` one is closed in `ESTABLISHED`. `connect_client` failing emits `CONNECT_FAIL` and drops the pipe from the pending list. `start_capture` destroys the session data when `media_bug_add` fails and runs the full cleanup when connecting fails. `fork_data_init` failure paths audited: `destroy_tech_pvt` is safe there. `CLIENT_CONNECTION_ERROR` already removed the pipe from the pending list.
+- [x] **Unterminated strings.** `parse_ws_uri` no longer copies the URI into a fixed buffer, rejects hosts/paths that do not fit and copies with `switch_copy_string`; the caller's buffers are zero-initialised. `sessionId` is a session-pool string like `bugname`, and the unused `host`/`path`/`port` fields of `private_t` are gone.
 
 ## Medium
 
@@ -18,7 +19,6 @@ Status is kept up to date as items are fixed. Items not touched since the origin
 - [ ] **Module unload can hang.** `deinitialize` sets `stopFlag` and joins but never calls `lws_cancel_service`; the thread blocks in `lws_service(context, 0)`. `fork_cleanup` does not close live pipes. `context` is not reset after `lws_context_destroy`.
 - [ ] **Unbounded memory growth on inbound binary.** `bidirectional_audio_stream_enable = enable + stream` (`lws_glue.cpp`) with `enable` defaulting to 1 makes `is_bidirectional_audio_stream()` true by default even though `SMBF_WRITE_REPLACE` is not set; binary frames then fill a playout buffer nothing drains. Even in stream mode both buffers grow via `set_capacity` with no cap. With `playAudio` gone, "enable without stream" has no purpose any more and could be dropped.
 - [ ] **Mixing wraps instead of clipping.** `vector_add` uses wrapping `_mm256_add_epi16` (and `a[i] += b[i]` in the tail); `vector_normalize` then clamps already-wrapped values and is effectively a no-op. Use saturating adds (`_mm256_adds_epi16`). Only the AVX2 path and scalar tail were checked.
-- [ ] **Unterminated strings.** `parse_ws_uri` does `strncpy(host, ..., MAX_WS_URL_LEN)` into an uninitialised `host[512]`; a host of 512+ chars has no terminator. Same for `sessionId` and other `strncpy` calls in `fork_data_init`.
 
 ## Low
 
@@ -44,3 +44,4 @@ Status is kept up to date as items are fixed. Items not touched since the origin
 
 - No ThreadSanitizer run and no test of the shared-state / callback path (`AudioPipe` needs FreeSWITCH + lws to build).
 - No live-call run of the race fixes.
+- The string-termination fix is only reviewed, not built or run (`parse_ws_uri` needs FreeSWITCH).

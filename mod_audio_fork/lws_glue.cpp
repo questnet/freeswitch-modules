@@ -334,10 +334,7 @@ namespace {
 
     memset(tech_pvt, 0, sizeof(private_t));
   
-    strncpy(tech_pvt->sessionId, switch_core_session_get_uuid(session), MAX_SESSION_ID);
-    strncpy(tech_pvt->host, host, MAX_WS_URL_LEN);
-    tech_pvt->port = port;
-    strncpy(tech_pvt->path, path, MAX_PATH_LEN);    
+    tech_pvt->sessionId = switch_core_session_strdup(session, switch_core_session_get_uuid(session));
     tech_pvt->sampling = desiredSampling;
     tech_pvt->responseHandler = responseHandler;
     tech_pvt->channels = channels;
@@ -428,7 +425,6 @@ namespace {
 extern "C" {
   int parse_ws_uri(switch_channel_t *channel, const char* szServerUri, char* host, char *path, unsigned int* pPort, int* pSslFlags) {
     int i = 0, offset;
-    char server[MAX_WS_URL_LEN + MAX_PATH_LEN];
     char *saveptr;
     int flags = LCCSCF_USE_SSL;
     
@@ -446,7 +442,7 @@ extern "C" {
     }
 
     // get the scheme
-    strncpy(server, szServerUri, MAX_WS_URL_LEN + MAX_PATH_LEN);
+    const char *server = szServerUri;
     if (0 == strncmp(server, "https://", 8) || 0 == strncmp(server, "HTTPS://", 8)) {
       *pSslFlags = flags;
       offset = 8;
@@ -484,15 +480,21 @@ extern "C" {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - %d: %s\n", i, matches[i].str().c_str());
       }
       */
-      strncpy(host, matches[1].str().c_str(), MAX_WS_URL_LEN);
+      const std::string strMatchedHost = matches[1].str();
+      const std::string strMatchedPath = matches[3].str();
+      if (strMatchedHost.length() >= MAX_WS_URL_LEN || strMatchedPath.length() >= MAX_PATH_LEN) {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - host or path too long\n");
+        return 0;
+      }
+      switch_copy_string(host, strMatchedHost.c_str(), MAX_WS_URL_LEN);
       if (matches[2].str().length() > 0) {
         *pPort = atoi(matches[2].str().c_str());
       }
       if (matches[3].str().length() > 0) {
-        strncpy(path, matches[3].str().c_str(), MAX_PATH_LEN);
+        switch_copy_string(path, strMatchedPath.c_str(), MAX_PATH_LEN);
       }
       else {
-        strcpy(path, "/");
+        switch_copy_string(path, "/", MAX_PATH_LEN);
       }
     } else {
       switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - invalid format %s\n", strHost.c_str());

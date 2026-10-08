@@ -253,7 +253,7 @@ SWITCH_STANDARD_API(fork_function)
       }
       else if (!strcasecmp(argv[1], "start")) {
 				switch_channel_t *channel = switch_core_session_get_channel(lsession);
-        char host[MAX_WS_URL_LEN], path[MAX_PATH_LEN];
+        char host[MAX_WS_URL_LEN] = {0}, path[MAX_PATH_LEN] = {0};
         unsigned int port;
         int sslFlags;
 				
