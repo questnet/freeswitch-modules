@@ -88,10 +88,15 @@ static switch_status_t start_capture(switch_core_session_t *session,
 		return SWITCH_STATUS_FALSE;
 	}
 
-	read_codec = switch_core_session_get_read_codec(session);
-
 	if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_fork: channel must have reached pre-answer status before calling start!\n");
+		return SWITCH_STATUS_FALSE;
+	}
+
+	/* only available once media is set up, so ask after pre-answer */
+	read_codec = switch_core_session_get_read_codec(session);
+	if (!read_codec || !read_codec->implementation) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_fork: channel has no read codec yet, cannot start!\n");
 		return SWITCH_STATUS_FALSE;
 	}
 
