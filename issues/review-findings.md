@@ -12,12 +12,12 @@ Status is kept up to date as items are fixed. Items not touched since the origin
 - [x] **Removed `playAudio` and `transcription`** (messages, events, README). The `playAudio` temp-file list and its races went with it. `killAudio` is kept.
 - [x] **Leaks / sockets left open.** `close()` on a pipe that is `IDLE` or `CONNECTING` is remembered (`m_closeRequested`) and honoured: an `IDLE` pipe never connects, a `CONNECTING` one is closed in `ESTABLISHED`. `connect_client` failing emits `CONNECT_FAIL` and drops the pipe from the pending list. `start_capture` destroys the session data when `media_bug_add` fails and runs the full cleanup when connecting fails. `fork_data_init` failure paths audited: `destroy_tech_pvt` is safe there. `CLIENT_CONNECTION_ERROR` already removed the pipe from the pending list.
 - [x] **Unterminated strings.** `parse_ws_uri` no longer copies the URI into a fixed buffer, rejects hosts/paths that do not fit and copies with `switch_copy_string`; the caller's buffers are zero-initialised. `sessionId` is a session-pool string like `bugname`, and the unused `host`/`path`/`port` fields of `private_t` are gone.
+- [x] **Unbounded memory growth on inbound binary.** The pipe accepts binary only if enable, stream and sample rate are all set (the condition for `SMBF_WRITE_REPLACE`); `enable` now defaults to 0. The playout buffer is deliberately left uncapped (long streamed playout is wanted). Not built or run.
 
 ## Medium
 
 - [ ] **Graceful shutdown blocks closing.** After `graceful-shutdown` the WRITEABLE handler returns early on `isGracefulShutdown()` and never reaches the `DISCONNECTING` branch, so a later `stop` cannot close our side. Also logged at ERROR for a normal event.
 - [ ] **Module unload can hang.** `deinitialize` sets `stopFlag` and joins but never calls `lws_cancel_service`; the thread blocks in `lws_service(context, 0)`. `fork_cleanup` does not close live pipes. `context` is not reset after `lws_context_destroy`.
-- [ ] **Unbounded memory growth on inbound binary.** `bidirectional_audio_stream_enable = enable + stream` (`lws_glue.cpp`) with `enable` defaulting to 1 makes `is_bidirectional_audio_stream()` true by default even though `SMBF_WRITE_REPLACE` is not set; binary frames then fill a playout buffer nothing drains. Even in stream mode both buffers grow via `set_capacity` with no cap. With `playAudio` gone, "enable without stream" has no purpose any more and could be dropped.
 - [ ] **Mixing wraps instead of clipping.** `vector_add` uses wrapping `_mm256_add_epi16` (and `a[i] += b[i]` in the tail); `vector_normalize` then clamps already-wrapped values and is effectively a no-op. Use saturating adds (`_mm256_adds_epi16`). Only the AVX2 path and scalar tail were checked.
 
 ## Low

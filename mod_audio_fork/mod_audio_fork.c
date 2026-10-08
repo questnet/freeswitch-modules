@@ -260,7 +260,7 @@ SWITCH_STANDARD_API(fork_function)
         int sampling = 8000;
       	switch_media_bug_flag_t flags = SMBF_READ_STREAM;
         char *metadata = NULL;
-				int bidirectional_audio_enable = 1;
+				int bidirectional_audio_enable = 0;
 				int bidirectional_audio_stream = 0;
 				int bidirectional_audio_sample_rate = 0;
 				int playback_only = 0;

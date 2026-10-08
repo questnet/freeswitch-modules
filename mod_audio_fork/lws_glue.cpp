@@ -322,7 +322,9 @@ namespace {
     const char* username = nullptr;
     const char* password = nullptr;
     int err;
-    int bidirectional_audio_stream_enable = bidirectional_audio_enable + bidirectional_audio_stream;
+    // must match the condition under which start sets SMBF_WRITE_REPLACE, otherwise nothing drains the playout buffer
+    int bidirectional_audio_stream_enable =
+      bidirectional_audio_enable && bidirectional_audio_stream && bidirectional_audio_sample_rate;
     switch_codec_implementation_t read_impl;
     switch_channel_t *channel = switch_core_session_get_channel(session);
 
