@@ -109,7 +109,10 @@ namespace drachtio {
   private:
     static std::thread serviceThread;
 
+    // lws calls this from C, so no exception may leave it: it wraps lws_callback_impl and closes the connection
+    // (returns -1) if that throws, e.g. when out of memory
     static int lws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len); 
+    static int lws_callback_impl(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len); 
     // The lws context is created by the service thread (lws_service_thread), but addPendingConnect()
     // reads it from whichever thread starts a call. Atomic so that read is not a data race.
     // It is null until the service thread has created the context (a call started right after module load
@@ -141,6 +144,7 @@ namespace drachtio {
     static void processPendingDisconnects(lws_per_vhost_data *vhd);
     static void processPendingWrites(void);
     
+    bool enqueueTextImpl(const char* text);
     bool connect_client(struct lws_per_vhost_data *vhd);
     void notify(NotifyEvent_t event, const char* message, const char* binary, size_t len) {
       m_callback(m_uuid.c_str(), m_bugname.c_str(), event, message, binary, len, m_userData.get());

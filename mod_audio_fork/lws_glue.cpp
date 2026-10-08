@@ -328,14 +328,18 @@ namespace {
     switch_codec_implementation_t read_impl;
     switch_channel_t *channel = switch_core_session_get_channel(session);
 
-    switch_core_session_get_read_impl(session, &read_impl);
+    // zeroed first so destroy_tech_pvt is safe on every early return below
+    memset(tech_pvt, 0, sizeof(private_t));
+
+    if (switch_core_session_get_read_impl(session, &read_impl) != SWITCH_STATUS_SUCCESS) {
+      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "unable to get the read codec implementation\n");
+      return SWITCH_STATUS_FALSE;
+    }
   
     if (username = switch_channel_get_variable(channel, "MOD_AUDIO_BASIC_AUTH_USERNAME")) {
       password = switch_channel_get_variable(channel, "MOD_AUDIO_BASIC_AUTH_PASSWORD");
     }
 
-    memset(tech_pvt, 0, sizeof(private_t));
-  
     tech_pvt->sessionId = switch_core_session_strdup(session, switch_core_session_get_uuid(session));
     tech_pvt->sampling = desiredSampling;
     tech_pvt->responseHandler = responseHandler;
@@ -470,36 +474,42 @@ extern "C" {
       return 0;
     }
 
-    std::string strHost(server + offset);
-    //- `([^/:]+)` captures the hostname/IP address, match any character except in the set
-    //- `:?([0-9]*)?` optionally captures a colon and the port number, if it's present.
-    //- `(/.*)` captures everything else (the path).
-    std::regex re("([^/:]+):?([0-9]*)?(/.*)?$");
-    std::smatch matches;
-    if(std::regex_search(strHost, matches, re)) {
-      /*
-      for (int i = 0; i < matches.length(); i++) {
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - %d: %s\n", i, matches[i].str().c_str());
-      }
-      */
-      const std::string strMatchedHost = matches[1].str();
-      const std::string strMatchedPath = matches[3].str();
-      if (strMatchedHost.length() >= MAX_WS_URL_LEN || strMatchedPath.length() >= MAX_PATH_LEN) {
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - host or path too long\n");
+    // called from C: std::regex and std::string can throw (out of memory, pattern too complex for the input)
+    try {
+      std::string strHost(server + offset);
+      //- `([^/:]+)` captures the hostname/IP address, match any character except in the set
+      //- `:?([0-9]*)?` optionally captures a colon and the port number, if it's present.
+      //- `(/.*)` captures everything else (the path).
+      std::regex re("([^/:]+):?([0-9]*)?(/.*)?$");
+      std::smatch matches;
+      if(std::regex_search(strHost, matches, re)) {
+        /*
+        for (int i = 0; i < matches.length(); i++) {
+          switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - %d: %s\n", i, matches[i].str().c_str());
+        }
+        */
+        const std::string strMatchedHost = matches[1].str();
+        const std::string strMatchedPath = matches[3].str();
+        if (strMatchedHost.length() >= MAX_WS_URL_LEN || strMatchedPath.length() >= MAX_PATH_LEN) {
+          switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - host or path too long\n");
+          return 0;
+        }
+        switch_copy_string(host, strMatchedHost.c_str(), MAX_WS_URL_LEN);
+        if (matches[2].str().length() > 0) {
+          *pPort = atoi(matches[2].str().c_str());
+        }
+        if (matches[3].str().length() > 0) {
+          switch_copy_string(path, strMatchedPath.c_str(), MAX_PATH_LEN);
+        }
+        else {
+          switch_copy_string(path, "/", MAX_PATH_LEN);
+        }
+      } else {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - invalid format %s\n", strHost.c_str());
         return 0;
       }
-      switch_copy_string(host, strMatchedHost.c_str(), MAX_WS_URL_LEN);
-      if (matches[2].str().length() > 0) {
-        *pPort = atoi(matches[2].str().c_str());
-      }
-      if (matches[3].str().length() > 0) {
-        switch_copy_string(path, strMatchedPath.c_str(), MAX_PATH_LEN);
-      }
-      else {
-        switch_copy_string(path, "/", MAX_PATH_LEN);
-      }
-    } else {
-      switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - invalid format %s\n", strHost.c_str());
+    } catch (...) {
+      switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - error parsing uri %s\n", szServerUri);
       return 0;
     }
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "parse_ws_uri - host %s, path %s\n", host, path);
@@ -556,8 +566,17 @@ extern "C" {
       return SWITCH_STATUS_FALSE;
     }
 
-    if (SWITCH_STATUS_SUCCESS != fork_data_init(tech_pvt, session, host, port, path, sslFlags, samples_per_second, sampling, channels, 
-      bugname, metadata, bidirectional_audio_enable, bidirectional_audio_stream, bidirectional_audio_sample_rate, responseHandler)) {
+    // this is called from C: an exception (out of memory) must not leave this function
+    switch_status_t status = SWITCH_STATUS_FALSE;
+    try {
+      status = fork_data_init(tech_pvt, session, host, port, path, sslFlags, samples_per_second, sampling, channels, 
+        bugname, metadata, bidirectional_audio_enable, bidirectional_audio_stream, bidirectional_audio_sample_rate, responseHandler);
+    } catch (const std::exception& e) {
+      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "fork_session_init failed: %s\n", e.what());
+    } catch (...) {
+      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "fork_session_init failed\n");
+    }
+    if (SWITCH_STATUS_SUCCESS != status) {
       destroy_tech_pvt(tech_pvt);
       return SWITCH_STATUS_FALSE;
     }

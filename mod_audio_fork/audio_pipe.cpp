@@ -47,6 +47,19 @@ static int dch_lws_http_basic_auth_gen(const char *user, const char *pw, char *b
 int AudioPipe::lws_callback(struct lws *wsi, 
   enum lws_callback_reasons reason,
   void *user, void *in, size_t len) {
+  try {
+    return lws_callback_impl(wsi, reason, user, in, len);
+  } catch (const std::exception& e) {
+    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,"AudioPipe::lws_callback reason %d: exception %s, closing connection\n", (int) reason, e.what());
+  } catch (...) {
+    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,"AudioPipe::lws_callback reason %d: exception, closing connection\n", (int) reason);
+  }
+  return -1;
+}
+
+int AudioPipe::lws_callback_impl(struct lws *wsi, 
+  enum lws_callback_reasons reason,
+  void *user, void *in, size_t len) {
 
   struct AudioPipe::lws_per_vhost_data *vhd = 
     (struct AudioPipe::lws_per_vhost_data *) lws_protocol_vh_priv_get(lws_get_vhost(wsi), lws_get_protocol(wsi));
@@ -565,6 +578,14 @@ bool AudioPipe::connect_client(struct lws_per_vhost_data *vhd) {
 }
 
 bool AudioPipe::enqueueText(const char* text) {
+  try {
+    return enqueueTextImpl(text);
+  } catch (...) {
+    return false;  // out of memory
+  }
+}
+
+bool AudioPipe::enqueueTextImpl(const char* text) {
   size_t len = strlen(text);
   if (len > MAX_TEXT_LEN) return false;
   bool connected;
