@@ -20,8 +20,18 @@ Status is kept up to date as items are fixed. Items not touched since the origin
 
 - [ ] **Graceful shutdown blocks closing.** After `graceful-shutdown` the WRITEABLE handler returns early on `isGracefulShutdown()` and never reaches the `DISCONNECTING` branch, so a later `stop` cannot close our side. Also logged at ERROR for a normal event.
 
+- [x] **Unlocked `PipeHandle::get` in API calls** (`lws_glue.cpp`, from `/code-review`). `fork_session_send_text` and `fork_session_graceful_shutdown` read `tech_pvt->pAudioPipe` without `tech_pvt->mutex`, while cleanup deletes the heap `Ptr` box in `PipeHandle::release` under it, so a concurrent `stop`/hangup could leave them dereferencing a freed box (narrow window). Both now take `tech_pvt->mutex` around `get` and the call. `fork_session_pauseresume` was named in the review but never uses `PipeHandle::get`. Not built or run.
+- [ ] **`close()` vs `LWS_CALLBACK_CLIENT_ESTABLISHED` race** (`audio_pipe.cpp` ~119, unverified). The `m_closeRequested` path sets `DISCONNECTING` and returns -1, while `close()` can concurrently CAS `CONNECTED` to `DISCONNECTING` and queue a second disconnect for a wsi that is already closing. Text queued before establishment (initial metadata, final stop text) is dropped without a log line.
+- [ ] **Short `lws_write` on a text frame closes the connection** (`audio_pipe.cpp` ~262, unverified). The code returns -1 although the comment says lws buffers short writes; with messages up to 1 MB (`MAX_TEXT_LEN`) this becomes likely and the dequeued message is lost.
+- [ ] **`deinitialize` does not drain the static `pendingConnects` / `pendingDisconnects` / `pendingWrites`** (`audio_pipe.cpp` ~524, unverified). They own `shared_ptr`s to pipes whose `userData` holds `StreamState`; destructors (incl. `speex_resampler_destroy`) can run after `dlclose`. Related to the open `fork_cleanup` item above.
+- [ ] **`dub_speech_frame` skips the whole frame when `clearPlayout` is set** (`lws_glue.cpp` ~1471, unverified) instead of clearing the buffer and still going through the write-replace path, and drops buffered playout when the try-locks fail (a frame of delay, audible gaps).
+- [ ] **`fork_session_cleanup` returns early without `destroy_tech_pvt` when the bug private is missing** (unverified; the `tech_pvt->id` read before the null check is listed under Low). Pipe and stream references are then not released.
+- [ ] **`connect_client` failure path** (`audio_pipe.cpp` ~399, unverified): between removal from `pendingConnects` and setting `FAILED`, `close()` sees `CONNECTING` and does nothing, and `CONNECT_FAIL` can be dispatched for an already torn-down session. Overlaps with the "Leaks / sockets left open" fix above, so check whether that fix already covers it.
+- [ ] **Possible leak when `fork_data_init` fails** (`lws_glue.cpp` ~336, unverified, **disputed**): the review says `PipeHandle::set` / `StreamHandle::set` boxes leak when the resampler init fails and `start_capture` does not clean up. The "Fixed" list above claims `destroy_tech_pvt` is safe on those paths and `start_capture` runs the full cleanup, so re-check before acting.
+
 ## Low
 
+- `enqueueText` recomputes the queued byte total by iterating the deque under `m_text_mutex` on every call (up to 1024 entries); keep a running counter instead (`audio_pipe.cpp` ~583, from `/code-review`).
 - `binaryWritePtrResetToZero` resets to 0 instead of `LWS_PRE`, so after an overrun the first 16 bytes are skipped; `buffer_overrun_notified` is never reset.
 - `fork_session_cleanup` reads `tech_pvt->id` before the `!tech_pvt` check.
 - `CONNECT_FAIL` JSON is concatenated by hand: message not escaped and may be NULL. Use cJSON.
@@ -32,6 +42,10 @@ Status is kept up to date as items are fixed. Items not touched since the origin
 - No `realloc` failure handling for `recv_buf` growth.
 - Samples not consumed by the resampler (`in_len`) are dropped by `cBuffer->clear()`.
 - Unknown message types (including the removed `playAudio` / `transcription`) are logged at ERROR.
+
+## Compatibility notes (intentional, from `/code-review`)
+
+- `bidirectional_audio_enable` now defaults to 0 for the short start syntax (`argc <= 9`), and `playAudio` / `transcription` messages and their events (`play_audio`, `transcription`) were removed. Existing jambonz/FreeSWITCH callers relying on them silently lose those events. Call this out in the PR description and release notes.
 
 ## Cleanups
 
