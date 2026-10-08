@@ -10,6 +10,8 @@
 #define MY_BUG_NAME "audio_fork"
 #define MAX_WS_URL_LEN (512)
 #define MAX_PATH_LEN (4096)
+// upper bound for the sample rates given to start (the audio buffer size grows with the rate)
+#define MAX_SAMPLE_RATE (64000)
 
 #define EVENT_TRANSFER        "mod_audio_fork::transfer"
 #define EVENT_KILL_AUDIO      "mod_audio_fork::kill_audio"

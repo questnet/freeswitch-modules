@@ -324,8 +324,13 @@ SWITCH_STANDARD_API(fork_function)
           switch_core_session_rwunlock(lsession);
           goto done;
         }
-        if (sampling <= 0 || sampling % 8000 != 0) {
+        if (sampling <= 0 || sampling > MAX_SAMPLE_RATE || sampling % 8000 != 0) {
           switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(lsession), SWITCH_LOG_ERROR, "invalid sample rate: %s\n", argv[4]);
+          switch_core_session_rwunlock(lsession);
+          goto done;
+        }
+        if (bidirectional_audio_sample_rate < 0 || bidirectional_audio_sample_rate > MAX_SAMPLE_RATE) {
+          switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(lsession), SWITCH_LOG_ERROR, "invalid bidirectional audio sample rate: %d\n", bidirectional_audio_sample_rate);
           switch_core_session_rwunlock(lsession);
           goto done;
         }
