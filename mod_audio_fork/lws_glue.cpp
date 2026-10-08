@@ -316,11 +316,6 @@ namespace {
             case drachtio::AudioPipe::CONNECT_SUCCESS:
               switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "connection successful\n");
               tech_pvt->responseHandler(session, EVENT_CONNECT_SUCCESS, NULL);
-              {
-                // switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "sending initial metadata\n");
-                drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe *>(tech_pvt->pAudioPipe);
-                pAudioPipe->sendInitialMessage();
-              }
             break;
             case drachtio::AudioPipe::CONNECT_FAIL:
             {
@@ -412,7 +407,7 @@ namespace {
       return SWITCH_STATUS_FALSE;
     }
 
-    if (metadata && !ap->setInitialMessage(metadata)) {
+    if (metadata && *metadata && !ap->enqueueText(metadata)) {
       switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "metadata exceeds max length of %d bytes\n", MAX_TEXT_LEN);
       delete ap;
       return SWITCH_STATUS_FALSE;
@@ -670,7 +665,11 @@ extern "C" {
       free(tmp);
     }
 
-    if (pAudioPipe && text) pAudioPipe->bufferForSending(text);
+    // A final text is only worth sending on a live connection. Checking the state and then queueing is
+    // not atomic: the state may change in between, e.g. the connection drops. That is harmless, enqueueText
+    // re-checks the state under the queue lock and either queues the text (it is freed with the pipe
+    // if never sent) or rejects it, and we ignore the result because the pipe is closed right after.
+    if (pAudioPipe && text && pAudioPipe->getLwsState() == drachtio::AudioPipe::LWS_CLIENT_CONNECTED) pAudioPipe->enqueueText(text);
     if (pAudioPipe) pAudioPipe->close();
 
     destroy_tech_pvt(tech_pvt);
@@ -689,8 +688,8 @@ extern "C" {
   
     if (!tech_pvt) return SWITCH_STATUS_FALSE;
     drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe *>(tech_pvt->pAudioPipe);
-    if (pAudioPipe && text && !pAudioPipe->bufferForSending(text)) {
-      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "fork_session_send_text failed because text exceeds max length of %d bytes\n", MAX_TEXT_LEN);
+    if (pAudioPipe && text && !pAudioPipe->enqueueText(text)) {
+      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "fork_session_send_text failed: text exceeds max length of %d bytes, send queue is full, or connection is closed\n", MAX_TEXT_LEN);
       return SWITCH_STATUS_FALSE;
     }
 

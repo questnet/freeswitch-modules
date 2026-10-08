@@ -4,6 +4,7 @@
 #include <string>
 #include <list>
 #include <deque>
+#include <atomic>
 #include <mutex>
 #include <queue>
 #include <unordered_map>
@@ -52,11 +53,9 @@ namespace drachtio {
 
     LwsState_t getLwsState(void) { return m_state; }
     void connect(void);
-    // queues text as one websocket text frame, returns false if it exceeds MAX_TEXT_LEN
-    bool bufferForSending(const char* text);
-    // stores text to be sent as the first frame once connected, returns false if it exceeds MAX_TEXT_LEN
-    bool setInitialMessage(const char* text);
-    void sendInitialMessage(void);
+    // queues text as one websocket text frame (held until connected), returns false if it exceeds
+    // MAX_TEXT_LEN, the queue is full (message count or total bytes), or the pipe is no longer usable
+    bool enqueueText(const char* text);
     size_t binarySpaceAvailable(void) {
       return m_audio_buffer_max_len - m_audio_buffer_write_offset;
     }
@@ -129,14 +128,13 @@ namespace drachtio {
     
     bool connect_client(struct lws_per_vhost_data *vhd);
 
-    LwsState_t m_state;
+    std::atomic<LwsState_t> m_state;
     std::string m_uuid;
     std::string m_host;
     std::string m_bugname;
     unsigned int m_port;
     std::string m_path;
     std::deque<std::string> m_text_queue;
-    std::string m_initial_message;
     std::mutex m_text_mutex;
     std::mutex m_audio_mutex;
     int m_sslFlags;

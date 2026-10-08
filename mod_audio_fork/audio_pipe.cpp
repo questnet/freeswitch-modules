@@ -6,6 +6,10 @@
 #include <cassert>
 #include <iostream>
 
+/* upper bounds for text waiting to be sent on one pipe */
+#define MAX_QUEUED_TEXT_BYTES (4 * 1024 * 1024)
+#define MAX_QUEUED_TEXT_MESSAGES 1024
+
 /* discard incoming text messages over the socket that are longer than this */
 #define MAX_RECV_BUF_SIZE (65 * 1024 * 10)
 #define RECV_BUF_REALLOC_SIZE (8 * 1024)
@@ -104,7 +108,12 @@ int AudioPipe::lws_callback(struct lws *wsi,
         if (ap) {
           *ppAp = ap;
           ap->m_vhd = vhd;
-          ap->m_state = LWS_CLIENT_CONNECTED;
+          {
+            // m_state changes under the text lock, see enqueueText
+            std::lock_guard<std::mutex> lk(ap->m_text_mutex);
+            ap->m_state = LWS_CLIENT_CONNECTED;
+            if (!ap->m_text_queue.empty()) lws_callback_on_writable(wsi);
+          }
           ap->m_callback(ap->m_uuid.c_str(), ap->m_bugname.c_str(), AudioPipe::CONNECT_SUCCESS, NULL, NULL, len);
         }
         else {
@@ -531,27 +540,24 @@ bool AudioPipe::connect_client(struct lws_per_vhost_data *vhd) {
   return nullptr != m_wsi;
 }
 
-bool AudioPipe::bufferForSending(const char* text) {
-  if (strlen(text) > MAX_TEXT_LEN) return false;
-  if (m_state != LWS_CLIENT_CONNECTED) return true;
+bool AudioPipe::enqueueText(const char* text) {
+  size_t len = strlen(text);
+  if (len > MAX_TEXT_LEN) return false;
+  bool connected;
   {
     std::lock_guard<std::mutex> lk(m_text_mutex);
+    // m_state changes to CONNECTED under this lock, so a text queued before that is flushed by the
+    // connect handler and a text queued after it needs the pending write below
+    connected = m_state == LWS_CLIENT_CONNECTED;
+    if (!connected && m_state != LWS_CLIENT_IDLE && m_state != LWS_CLIENT_CONNECTING) return false;
+    if (m_text_queue.size() >= MAX_QUEUED_TEXT_MESSAGES) return false;
+    size_t queued = 0;
+    for (const auto& queuedText : m_text_queue) queued += queuedText.length();
+    if (queued + len > MAX_QUEUED_TEXT_BYTES) return false;
     m_text_queue.emplace_back(text);
   }
-  addPendingWrite(this);
+  if (connected) addPendingWrite(this);
   return true;
-}
-
-bool AudioPipe::setInitialMessage(const char* text) {
-  if (strlen(text) > MAX_TEXT_LEN) return false;
-  m_initial_message = text;
-  return true;
-}
-
-void AudioPipe::sendInitialMessage(void) {
-  if (m_initial_message.empty()) return;
-  bufferForSending(m_initial_message.c_str());
-  m_initial_message.clear();
 }
 
 void AudioPipe::unlockAudioBuffer() {
