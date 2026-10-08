@@ -3,17 +3,18 @@
 #include <string.h>
 #include <string>
 #include <mutex>
+#include <atomic>
+#include <vector>
 #include <thread>
 #include <list>
+#include <memory>
 #include <algorithm>
 #include <functional>
 #include <cassert>
 #include <cstdlib>
-#include <fstream>
 #include <sstream>
 #include <regex>
 
-#include "base64.hpp"
 #include "parser.hpp"
 #include "mod_audio_fork.h"
 #include "audio_pipe.hpp"
@@ -36,15 +37,71 @@ namespace {
     std::getenv("MOD_AUDIO_FORK_SUBPROTOCOL_NAME") : "audio.drachtio.org";
   static unsigned int nServiceThreads = std::max(1, std::min(requestedNumServiceThreads ? ::atoi(requestedNumServiceThreads) : 1, 5));
   static unsigned int idxCallCount = 0;
-  static uint32_t playCount = 0;
 
-  switch_status_t processIncomingBinary(private_t* tech_pvt, switch_core_session_t* session, const char* message, size_t dataLength) {
+  // Session-side owner of an AudioPipe. private_t is a plain C struct shared with mod_audio_fork.c,
+  // so the reference lives behind its void* pAudioPipe. It is held until destroy_tech_pvt; a pipe whose
+  // connection has ended is detected by its state, not by a null pointer.
+  namespace PipeHandle {
+    typedef std::shared_ptr<drachtio::AudioPipe> Ptr;
+
+    void set(private_t* tech_pvt, Ptr pipe) { tech_pvt->pAudioPipe = new Ptr(std::move(pipe)); }
+
+    drachtio::AudioPipe* get(const private_t* tech_pvt) {
+      return tech_pvt->pAudioPipe ? static_cast<Ptr*>(tech_pvt->pAudioPipe)->get() : nullptr;
+    }
+
+    void release(private_t* tech_pvt) {
+      delete static_cast<Ptr*>(tech_pvt->pAudioPipe);
+      tech_pvt->pAudioPipe = nullptr;
+    }
+  }
+
+  // Everything the lws thread touches for bidirectional audio. It is shared (shared_ptr) between the session
+  // (tech_pvt->pStream) and the AudioPipe, which passes it to every callback. So cleanup on the session side
+  // only drops its reference and the state stays alive until the pipe is finished with it, i.e. it is freed
+  // by whoever lets go last instead of by fork_session_cleanup while the lws thread may still be using it.
+  struct StreamState {
+    // lws thread only
+    CircularBuffer_t preBuffer{8192};
+    SpeexResamplerState* resampler = nullptr;
+    uint8_t setAsideByte = 0;
+    bool hasSetAsideByte = false;
+    int preBufSize = 0;
+    int downscaleFactor = 1;
+
+    // shared between the lws thread (insert) and the media thread (drain)
+    std::mutex playoutMutex;
+    CircularBuffer_t playout{8192};   // guarded by playoutMutex
+    std::atomic<bool> clearPlayout{false};
+
+    ~StreamState() {
+      if (resampler) speex_resampler_destroy(resampler);
+    }
+  };
+
+  // session-side owner of a StreamState reference, see PipeHandle
+  namespace StreamHandle {
+    typedef std::shared_ptr<StreamState> Ptr;
+
+    void set(private_t* tech_pvt, Ptr stream) { tech_pvt->pStream = new Ptr(std::move(stream)); }
+
+    StreamState* get(const private_t* tech_pvt) {
+      return tech_pvt->pStream ? static_cast<Ptr*>(tech_pvt->pStream)->get() : nullptr;
+    }
+
+    void release(private_t* tech_pvt) {
+      delete static_cast<Ptr*>(tech_pvt->pStream);
+      tech_pvt->pStream = nullptr;
+    }
+  }
+
+  switch_status_t processIncomingBinary(StreamState* ss, const char* message, size_t dataLength) {
     std::vector<uint8_t> data;
 
     // Prepend the set-aside byte if there is one
-    if (tech_pvt->has_set_aside_byte) {
-        data.push_back(tech_pvt->set_aside_byte);
-        tech_pvt->has_set_aside_byte = false;
+    if (ss->hasSetAsideByte) {
+        data.push_back(ss->setAsideByte);
+        ss->hasSetAsideByte = false;
     }
 
     // Append the new incoming message
@@ -53,8 +110,8 @@ namespace {
     // Check if the total data length is now odd
     if (data.size() % 2 != 0) {
         // Set aside the last byte
-        tech_pvt->set_aside_byte = data.back();
-        tech_pvt->has_set_aside_byte = true;
+        ss->setAsideByte = data.back();
+        ss->hasSetAsideByte = true;
         data.pop_back(); // Remove the last byte from the data vector
     }
 
@@ -63,7 +120,7 @@ namespace {
     size_t numSamples = data.size() / sizeof(uint16_t);
 
     // Access the prebuffer
-    CircularBuffer_t* cBuffer = static_cast<CircularBuffer_t*>(tech_pvt->streamingPreBuffer);
+    CircularBuffer_t* cBuffer = &ss->preBuffer;
 
     // Ensure the prebuffer has enough capacity
     if (cBuffer->capacity() - cBuffer->size() < numSamples) {
@@ -76,7 +133,7 @@ namespace {
     //switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Appended %zu 16-bit samples to the prebuffer.\n", numSamples);
 
     // if we haven't reached threshold amount of prebuffered data, return
-    if (cBuffer->size() < tech_pvt->streamingPreBufSize) {
+    if (cBuffer->size() < ss->preBufSize) {
         //switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Prebuffered data is below threshold %u, returning.\n", tech_pvt->streamingPreBufSize);
         return SWITCH_STATUS_SUCCESS;
     }
@@ -84,10 +141,10 @@ namespace {
     //switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Prebuffered data samples %u is above threshold %u, prepare to playout.\n", cBuffer->size(), tech_pvt->streamingPreBufSize);
 
     // after initial pre-buffering, rachet down the threshold to 40ms
-    tech_pvt->streamingPreBufSize = 320 * tech_pvt->downscale_factor * 2;
+    ss->preBufSize = 320 * ss->downscaleFactor * 2;
 
     // Check for downsampling factor
-    size_t downsample_factor = tech_pvt->downscale_factor;
+    size_t downsample_factor = ss->downscaleFactor;
 
     // Calculate the number of samples that can be evenly divided by the downsample factor
     size_t numCompleteSamples = (cBuffer->size() / downsample_factor) * downsample_factor;
@@ -104,7 +161,7 @@ namespace {
     // resample if necessary
     std::vector<int16_t> out;
     try {
-      if (tech_pvt->bidirectional_audio_resampler) {
+      if (ss->resampler) {
         // Improvement: Use assign to convert circular buffer to vector for resampling
         std::vector<int16_t> in;
         in.assign(cBuffer->begin(), cBuffer->end()); 
@@ -115,7 +172,7 @@ namespace {
 
         //switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Resampling %u samples into a buffer that can hold %u samples\n", in.size(), out_len);
 
-        speex_resampler_process_interleaved_int(tech_pvt->bidirectional_audio_resampler, in.data(), &in_len, out.data(), &out_len);
+        speex_resampler_process_interleaved_int(ss->resampler, in.data(), &in_len, out.data(), &out_len);
 
         // Resize the output buffer to match the output length from resampler
         //switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Resizing output buffer from %u to %u samples\n", in.size(), out_len);
@@ -134,8 +191,10 @@ namespace {
       return SWITCH_STATUS_FALSE;
     }
 
-    if (nullptr != tech_pvt->mutex && switch_mutex_trylock(tech_pvt->mutex) == SWITCH_STATUS_SUCCESS) {
-      CircularBuffer_t *playoutBuffer = (CircularBuffer_t *) tech_pvt->streamingPlayoutBuffer;
+    {
+      // only held for the insert; the media thread holds it just as briefly while draining
+      std::lock_guard<std::mutex> lk(ss->playoutMutex);
+      CircularBuffer_t *playoutBuffer = &ss->playout;
 
       try {
         // Resize the buffer if necessary
@@ -148,150 +207,60 @@ namespace {
         playoutBuffer->insert(playoutBuffer->end(), out.begin(), out.end());
         //switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Appended %zu 16-bit samples to the playout buffer.\n", out.size());
       } catch (const std::exception& e) {
-        switch_mutex_unlock(tech_pvt->mutex);
         cBuffer->clear();
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error processing incoming binary message: %s\n", e.what());
         return SWITCH_STATUS_FALSE;
       } catch (...) {
-        switch_mutex_unlock(tech_pvt->mutex);
         cBuffer->clear();
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error processing incoming binary message\n");
         return SWITCH_STATUS_FALSE;
       }
-      switch_mutex_unlock(tech_pvt->mutex);
-      cBuffer->clear();
-
-      // Put the leftover samples back in the prebuffer for the next time
-      if (!leftoverSamples.empty()) {
-          cBuffer->insert(cBuffer->end(), leftoverSamples.begin(), leftoverSamples.end());
-          //switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Put back %u leftover samples into the prebuffer.\n", leftoverSamples.size());
-      }
-      return SWITCH_STATUS_SUCCESS;
     }
-    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Failed to get mutext (temp)\n");
+    cBuffer->clear();
 
+    // Put the leftover samples back in the prebuffer for the next time
+    if (!leftoverSamples.empty()) {
+        cBuffer->insert(cBuffer->end(), leftoverSamples.begin(), leftoverSamples.end());
+        //switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Put back %u leftover samples into the prebuffer.\n", leftoverSamples.size());
+    }
     return SWITCH_STATUS_SUCCESS;
   }
 
-  void processIncomingMessage(private_t* tech_pvt, switch_core_session_t* session, const char* message) {
+  void processIncomingMessage(private_t* tech_pvt, switch_core_session_t* session, const char* message, StreamState* ss) {
     std::string msg = message;
     std::string type;
     cJSON* json = parse_json(session, msg, type) ;
     if (json) {
       switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "(%u) processIncomingMessage - received %s message %s\n", tech_pvt->id, type.c_str(), message);
       cJSON* jsonData = cJSON_GetObjectItem(json, "data");
-      if (0 == type.compare("playAudio") &&
-        // playAudio is enabled and there is no bidirectional audio from stream is enabled.
-        tech_pvt->bidirectional_audio_enable &&
-        !tech_pvt->bidirectional_audio_stream) {
-        if (jsonData) {
-          // dont send actual audio bytes in event message
-          cJSON* jsonFile = NULL;
-          cJSON* jsonAudio = cJSON_DetachItemFromObject(jsonData, "audioContent");
-          int validAudio = (jsonAudio && NULL != jsonAudio->valuestring);
-
-          const char* szAudioContentType = cJSON_GetObjectCstr(jsonData, "audioContentType");
-          char fileType[6];
-          int sampleRate = 16000;
-          if (0 == strcmp(szAudioContentType, "raw")) {
-            cJSON* jsonSR = cJSON_GetObjectItem(jsonData, "sampleRate");
-            sampleRate = jsonSR && jsonSR->valueint ? jsonSR->valueint : 0;
-
-            switch(sampleRate) {
-              case 8000:
-                strcpy(fileType, ".r8");
-                break;
-              case 16000:
-                strcpy(fileType, ".r16");
-                break;
-              case 24000:
-                strcpy(fileType, ".r24");
-                break;
-              case 32000:
-                strcpy(fileType, ".r32");
-                break;
-              case 48000:
-                strcpy(fileType, ".r48");
-                break;
-              case 64000:
-                strcpy(fileType, ".r64");
-                break;
-              default:
-                strcpy(fileType, ".r16");
-                break;
-            }
-          }
-          else if (0 == strcmp(szAudioContentType, "wave") || 0 == strcmp(szAudioContentType, "wav")) {
-            strcpy(fileType, ".wav");
-          }
-          else {
-            validAudio = 0;
-            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "(%u) processIncomingMessage - unsupported audioContentType: %s\n", tech_pvt->id, szAudioContentType);
-          }
-
-          if (validAudio) {
-            char szFilePath[256];
-
-            std::string rawAudio = drachtio::base64_decode(jsonAudio->valuestring);
-            switch_snprintf(szFilePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir, 
-              SWITCH_PATH_SEPARATOR, tech_pvt->sessionId, playCount++, fileType);
-            std::ofstream f(szFilePath, std::ofstream::binary);
-            f << rawAudio;
-            f.close();
-
-            // add the file to the list of files played for this session, we'll delete when session closes
-            struct playout* playout = (struct playout *) malloc(sizeof(struct playout));
-            playout->file = (char *) malloc(strlen(szFilePath) + 1);
-            strcpy(playout->file, szFilePath);
-            playout->next = tech_pvt->playout;
-            tech_pvt->playout = playout;
-
-            jsonFile = cJSON_CreateString(szFilePath);
-            cJSON_AddItemToObject(jsonData, "file", jsonFile);
-          }
-
-          char* jsonString = cJSON_PrintUnformatted(jsonData);
-          tech_pvt->responseHandler(session, EVENT_PLAY_AUDIO, jsonString);
-          free(jsonString);
-          if (jsonAudio) cJSON_Delete(jsonAudio);
-        }
-        else {
-          switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "(%u) processIncomingMessage - missing data payload in playAudio request\n", tech_pvt->id); 
-        }
-      }
-      else if (0 == type.compare("killAudio")) {
-        tech_pvt->responseHandler(session, EVENT_KILL_AUDIO, NULL);
+      if (0 == type.compare("killAudio")) {
+        tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_KILL_AUDIO, NULL);
 
         // kill any current playback on the channel
         switch_channel_t *channel = switch_core_session_get_channel(session);
         switch_channel_set_flag_value(channel, CF_BREAK, 2);
 
         // this will dump buffered incoming audio
-        tech_pvt->clear_bidirectional_audio_buffer = true;
-      }
-      else if (0 == type.compare("transcription")) {
-        char* jsonString = cJSON_PrintUnformatted(jsonData);
-        tech_pvt->responseHandler(session, EVENT_TRANSCRIPTION, jsonString);
-        free(jsonString);        
+        ss->clearPlayout = true;
       }
       else if (0 == type.compare("transfer")) {
         char* jsonString = cJSON_PrintUnformatted(jsonData);
-        tech_pvt->responseHandler(session, EVENT_TRANSFER, jsonString);
+        tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_TRANSFER, jsonString);
         free(jsonString);                
       }
       else if (0 == type.compare("disconnect")) {
         char* jsonString = cJSON_PrintUnformatted(jsonData);
-        tech_pvt->responseHandler(session, EVENT_DISCONNECT, jsonString);
+        tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_DISCONNECT, jsonString);
         free(jsonString);        
       }
       else if (0 == type.compare("error")) {
         char* jsonString = cJSON_PrintUnformatted(jsonData);
-        tech_pvt->responseHandler(session, EVENT_ERROR, jsonString);
+        tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_ERROR, jsonString);
         free(jsonString);        
       }
       else if (0 == type.compare("json")) {
         char* jsonString = cJSON_PrintUnformatted(json);
-        tech_pvt->responseHandler(session, EVENT_JSON, jsonString);
+        tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_JSON, jsonString);
         free(jsonString);
       }
       else {
@@ -304,7 +273,8 @@ namespace {
     }
   }
 
-  static void eventCallback(const char* sessionId, const char* bugname, drachtio::AudioPipe::NotifyEvent_t event, const char* message, const char* binary, size_t len) {
+  static void eventCallback(const char* sessionId, const char* bugname, drachtio::AudioPipe::NotifyEvent_t event, const char* message, const char* binary, size_t len, void* userData) {
+    StreamState* ss = static_cast<StreamState*>(userData);
     switch_core_session_t* session = switch_core_session_locate(sessionId);
     if (session) {
       switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -315,39 +285,28 @@ namespace {
           switch (event) {
             case drachtio::AudioPipe::CONNECT_SUCCESS:
               switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "connection successful\n");
-              tech_pvt->responseHandler(session, EVENT_CONNECT_SUCCESS, NULL);
-              if (strlen(tech_pvt->initialMetadata) > 0) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "sending initial metadata %s\n", tech_pvt->initialMetadata);
-                drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe *>(tech_pvt->pAudioPipe);
-                pAudioPipe->bufferForSending(tech_pvt->initialMetadata);
-              }
+              tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_CONNECT_SUCCESS, NULL);
             break;
             case drachtio::AudioPipe::CONNECT_FAIL:
             {
-              // first thing: we can no longer access the AudioPipe
               std::stringstream json;
               json << "{\"reason\":\"" << message << "\"}";
-              tech_pvt->pAudioPipe = nullptr;
-              tech_pvt->responseHandler(session, EVENT_CONNECT_FAIL, (char *) json.str().c_str());
+              tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_CONNECT_FAIL, (char *) json.str().c_str());
               switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "connection failed: %s\n", message);
             }
             break;
             case drachtio::AudioPipe::CONNECTION_DROPPED:
-              // first thing: we can no longer access the AudioPipe
-              tech_pvt->pAudioPipe = nullptr;
-              tech_pvt->responseHandler(session, EVENT_DISCONNECT, NULL);
+              tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_DISCONNECT, NULL);
               switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "connection dropped from far end\n");
             break;
             case drachtio::AudioPipe::CONNECTION_CLOSED_GRACEFULLY:
-              // first thing: we can no longer access the AudioPipe
-              tech_pvt->pAudioPipe = nullptr;
               switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "connection closed gracefully\n");
             break;
             case drachtio::AudioPipe::MESSAGE:
-              processIncomingMessage(tech_pvt, session, message);
+              processIncomingMessage(tech_pvt, session, message, ss);
             break;
             case drachtio::AudioPipe::BINARY:
-            processIncomingBinary(tech_pvt, session, binary, len);
+            processIncomingBinary(ss, binary, len);
             break;
           }
         }
@@ -363,57 +322,56 @@ namespace {
     const char* username = nullptr;
     const char* password = nullptr;
     int err;
-    int bidirectional_audio_stream_enable = bidirectional_audio_enable + bidirectional_audio_stream;
+    // must match the condition under which start sets SMBF_WRITE_REPLACE, otherwise nothing drains the playout buffer
+    int bidirectional_audio_stream_enable =
+      bidirectional_audio_enable && bidirectional_audio_stream && bidirectional_audio_sample_rate;
     switch_codec_implementation_t read_impl;
     switch_channel_t *channel = switch_core_session_get_channel(session);
 
-    switch_core_session_get_read_impl(session, &read_impl);
+    // zeroed first so destroy_tech_pvt is safe on every early return below
+    memset(tech_pvt, 0, sizeof(private_t));
+
+    if (switch_core_session_get_read_impl(session, &read_impl) != SWITCH_STATUS_SUCCESS) {
+      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "unable to get the read codec implementation\n");
+      return SWITCH_STATUS_FALSE;
+    }
   
     if (username = switch_channel_get_variable(channel, "MOD_AUDIO_BASIC_AUTH_USERNAME")) {
       password = switch_channel_get_variable(channel, "MOD_AUDIO_BASIC_AUTH_PASSWORD");
     }
 
-    memset(tech_pvt, 0, sizeof(private_t));
-  
-    strncpy(tech_pvt->sessionId, switch_core_session_get_uuid(session), MAX_SESSION_ID);
-    strncpy(tech_pvt->host, host, MAX_WS_URL_LEN);
-    tech_pvt->port = port;
-    strncpy(tech_pvt->path, path, MAX_PATH_LEN);    
+    tech_pvt->sessionId = switch_core_session_strdup(session, switch_core_session_get_uuid(session));
     tech_pvt->sampling = desiredSampling;
     tech_pvt->responseHandler = responseHandler;
-    tech_pvt->playout = NULL;
     tech_pvt->channels = channels;
     tech_pvt->id = ++idxCallCount;
     tech_pvt->buffer_overrun_notified = 0;
     tech_pvt->audio_paused = 0;
     tech_pvt->graceful_shutdown = 0;
-    tech_pvt->streamingPlayoutBuffer = (void *) new CircularBuffer_t(8192);
+    StreamHandle::Ptr stream = std::make_shared<StreamState>();
     tech_pvt->bidirectional_audio_enable = bidirectional_audio_enable;
     tech_pvt->bidirectional_audio_stream = bidirectional_audio_stream;
     tech_pvt->bidirectional_audio_sample_rate = bidirectional_audio_sample_rate;
-    tech_pvt->clear_bidirectional_audio_buffer = false;
-    tech_pvt->has_set_aside_byte = 0;
-    tech_pvt->downscale_factor = 1;
     if (bidirectional_audio_sample_rate > sampling) {
-      tech_pvt->downscale_factor = bidirectional_audio_sample_rate / sampling;
-      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "downscale_factor is %d\n", tech_pvt->downscale_factor);
+      stream->downscaleFactor = bidirectional_audio_sample_rate / sampling;
+      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "downscale_factor is %d\n", stream->downscaleFactor);
     }
-    tech_pvt->streamingPreBufSize = 320 * tech_pvt->downscale_factor * 4; // min 80ms prebuffer
-    tech_pvt->streamingPreBuffer = (void *) new CircularBuffer_t(8192);
+    stream->preBufSize = 320 * stream->downscaleFactor * 4; // min 80ms prebuffer
 
-    strncpy(tech_pvt->bugname, bugname, MAX_BUG_LEN);
-    if (metadata) strncpy(tech_pvt->initialMetadata, metadata, MAX_METADATA_LEN);
+    tech_pvt->bugname = switch_core_session_strdup(session, bugname);
     
     size_t buflen = LWS_PRE + (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PACKETIZATION_PERIOD * nAudioBufferSecs);
 
-    drachtio::AudioPipe* ap = new drachtio::AudioPipe(tech_pvt->sessionId, host, port, path, sslFlags, 
-      buflen, read_impl.decoded_bytes_per_packet, username, password, bugname, bidirectional_audio_stream_enable, eventCallback);
-    if (!ap) {
-      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error allocating AudioPipe\n");
+    PipeHandle::Ptr ap = std::make_shared<drachtio::AudioPipe>(tech_pvt->sessionId, host, port, path, sslFlags, 
+      buflen, read_impl.decoded_bytes_per_packet, username, password, bugname, bidirectional_audio_stream_enable, eventCallback, stream);
+
+    if (metadata && *metadata && !ap->enqueueText(metadata)) {
+      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "metadata exceeds max length of %d bytes\n", MAX_TEXT_LEN);
       return SWITCH_STATUS_FALSE;
     }
 
-    tech_pvt->pAudioPipe = static_cast<void *>(ap);
+    PipeHandle::set(tech_pvt, ap);
+    StreamHandle::set(tech_pvt, stream);
 
     switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 
@@ -431,7 +389,7 @@ namespace {
 
     if (bidirectional_audio_sample_rate && sampling != bidirectional_audio_sample_rate) {
       switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%u) bidirectional audio resampling from %u to %u, channels %d\n", tech_pvt->id, bidirectional_audio_sample_rate, sampling, channels);
-      tech_pvt->bidirectional_audio_resampler = speex_resampler_init(1, bidirectional_audio_sample_rate, sampling, SWITCH_RESAMPLE_QUALITY, &err);
+      stream->resampler = speex_resampler_init(1, bidirectional_audio_sample_rate, sampling, SWITCH_RESAMPLE_QUALITY, &err);
       if (0 != err) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing bidirectional audio resampler: %s.\n", speex_resampler_strerror(err));
         return SWITCH_STATUS_FALSE;
@@ -445,28 +403,15 @@ namespace {
 
   void destroy_tech_pvt(private_t* tech_pvt) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s (%u) destroy_tech_pvt\n", tech_pvt->sessionId, tech_pvt->id);
+    // drop the session's references; the pipe and the stream state are freed once the lws side is done with them too
+    PipeHandle::release(tech_pvt);
+    StreamHandle::release(tech_pvt);
     if (tech_pvt->resampler) {
       speex_resampler_destroy(tech_pvt->resampler);
       tech_pvt->resampler = nullptr;
     }
-    if (tech_pvt->bidirectional_audio_resampler) {
-      speex_resampler_destroy(tech_pvt->bidirectional_audio_resampler);
-      tech_pvt->bidirectional_audio_resampler = nullptr;
-    }
-    if (tech_pvt->mutex) {
-      switch_mutex_destroy(tech_pvt->mutex);
-      tech_pvt->mutex = nullptr;
-    }
-    if (tech_pvt->streamingPlayoutBuffer) {
-      CircularBuffer_t *cBuffer = (CircularBuffer_t *) tech_pvt->streamingPlayoutBuffer;
-      delete cBuffer;
-      tech_pvt->streamingPlayoutBuffer = nullptr;
-    }
-    if (tech_pvt->streamingPreBuffer) {
-      CircularBuffer_t *cBuffer = (CircularBuffer_t *) tech_pvt->streamingPreBuffer;
-      delete cBuffer;
-      tech_pvt->streamingPreBuffer = nullptr;
-    }
+    // tech_pvt->mutex is not destroyed: it lives in the session pool, and a second fork_session_cleanup
+    // may still be waiting on it to find out that the first one is done
   }
 
   void lws_logger(int level, const char *line) {
@@ -486,7 +431,6 @@ namespace {
 extern "C" {
   int parse_ws_uri(switch_channel_t *channel, const char* szServerUri, char* host, char *path, unsigned int* pPort, int* pSslFlags) {
     int i = 0, offset;
-    char server[MAX_WS_URL_LEN + MAX_PATH_LEN];
     char *saveptr;
     int flags = LCCSCF_USE_SSL;
     
@@ -504,7 +448,7 @@ extern "C" {
     }
 
     // get the scheme
-    strncpy(server, szServerUri, MAX_WS_URL_LEN + MAX_PATH_LEN);
+    const char *server = szServerUri;
     if (0 == strncmp(server, "https://", 8) || 0 == strncmp(server, "HTTPS://", 8)) {
       *pSslFlags = flags;
       offset = 8;
@@ -530,30 +474,42 @@ extern "C" {
       return 0;
     }
 
-    std::string strHost(server + offset);
-    //- `([^/:]+)` captures the hostname/IP address, match any character except in the set
-    //- `:?([0-9]*)?` optionally captures a colon and the port number, if it's present.
-    //- `(/.*)` captures everything else (the path).
-    std::regex re("([^/:]+):?([0-9]*)?(/.*)?$");
-    std::smatch matches;
-    if(std::regex_search(strHost, matches, re)) {
-      /*
-      for (int i = 0; i < matches.length(); i++) {
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - %d: %s\n", i, matches[i].str().c_str());
+    // called from C: std::regex and std::string can throw (out of memory, pattern too complex for the input)
+    try {
+      std::string strHost(server + offset);
+      //- `([^/:]+)` captures the hostname/IP address, match any character except in the set
+      //- `:?([0-9]*)?` optionally captures a colon and the port number, if it's present.
+      //- `(/.*)` captures everything else (the path).
+      std::regex re("([^/:]+):?([0-9]*)?(/.*)?$");
+      std::smatch matches;
+      if(std::regex_search(strHost, matches, re)) {
+        /*
+        for (int i = 0; i < matches.length(); i++) {
+          switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - %d: %s\n", i, matches[i].str().c_str());
+        }
+        */
+        const std::string strMatchedHost = matches[1].str();
+        const std::string strMatchedPath = matches[3].str();
+        if (strMatchedHost.length() >= MAX_WS_URL_LEN || strMatchedPath.length() >= MAX_PATH_LEN) {
+          switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - host or path too long\n");
+          return 0;
+        }
+        switch_copy_string(host, strMatchedHost.c_str(), MAX_WS_URL_LEN);
+        if (matches[2].str().length() > 0) {
+          *pPort = atoi(matches[2].str().c_str());
+        }
+        if (matches[3].str().length() > 0) {
+          switch_copy_string(path, strMatchedPath.c_str(), MAX_PATH_LEN);
+        }
+        else {
+          switch_copy_string(path, "/", MAX_PATH_LEN);
+        }
+      } else {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - invalid format %s\n", strHost.c_str());
+        return 0;
       }
-      */
-      strncpy(host, matches[1].str().c_str(), MAX_WS_URL_LEN);
-      if (matches[2].str().length() > 0) {
-        *pPort = atoi(matches[2].str().c_str());
-      }
-      if (matches[3].str().length() > 0) {
-        strncpy(path, matches[3].str().c_str(), MAX_PATH_LEN);
-      }
-      else {
-        strcpy(path, "/");
-      }
-    } else {
-      switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - invalid format %s\n", strHost.c_str());
+    } catch (...) {
+      switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - error parsing uri %s\n", szServerUri);
       return 0;
     }
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "parse_ws_uri - host %s, path %s\n", host, path);
@@ -610,8 +566,17 @@ extern "C" {
       return SWITCH_STATUS_FALSE;
     }
 
-    if (SWITCH_STATUS_SUCCESS != fork_data_init(tech_pvt, session, host, port, path, sslFlags, samples_per_second, sampling, channels, 
-      bugname, metadata, bidirectional_audio_enable, bidirectional_audio_stream, bidirectional_audio_sample_rate, responseHandler)) {
+    // this is called from C: an exception (out of memory) must not leave this function
+    switch_status_t status = SWITCH_STATUS_FALSE;
+    try {
+      status = fork_data_init(tech_pvt, session, host, port, path, sslFlags, samples_per_second, sampling, channels, 
+        bugname, metadata, bidirectional_audio_enable, bidirectional_audio_stream, bidirectional_audio_sample_rate, responseHandler);
+    } catch (const std::exception& e) {
+      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "fork_session_init failed: %s\n", e.what());
+    } catch (...) {
+      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "fork_session_init failed\n");
+    }
+    if (SWITCH_STATUS_SUCCESS != status) {
       destroy_tech_pvt(tech_pvt);
       return SWITCH_STATUS_FALSE;
     }
@@ -620,9 +585,17 @@ extern "C" {
     return SWITCH_STATUS_SUCCESS;
   }
 
+  // for a session that was initialised but never got as far as having a media bug (or a connection) to clean up
+  void fork_session_destroy(void **ppUserData) {
+    private_t *tech_pvt = static_cast<private_t *>(*ppUserData);
+    if (tech_pvt) destroy_tech_pvt(tech_pvt);
+    *ppUserData = nullptr;
+  }
+
    switch_status_t fork_session_connect(void **ppUserData) {
     private_t *tech_pvt = static_cast<private_t *>(*ppUserData);
-    drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe*>(tech_pvt->pAudioPipe);
+    drachtio::AudioPipe *pAudioPipe = PipeHandle::get(tech_pvt);
+    if (!pAudioPipe) return SWITCH_STATUS_FALSE;
     pAudioPipe->connect();
     return SWITCH_STATUS_SUCCESS;
   }
@@ -635,40 +608,36 @@ extern "C" {
       return SWITCH_STATUS_FALSE;
     }
     private_t* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+    if (!tech_pvt) return SWITCH_STATUS_FALSE;
     uint32_t id = tech_pvt->id;
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%u) fork_session_cleanup\n", id);
 
-    if (!tech_pvt) return SWITCH_STATUS_FALSE;
-    drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe *>(tech_pvt->pAudioPipe);
-      
     switch_mutex_lock(tech_pvt->mutex);
 
-    // get the bug again, now that we are under lock
-    {
-      switch_media_bug_t *bug = (switch_media_bug_t*) switch_channel_get_private(channel, bugname);
-      if (bug) {
-        switch_channel_set_private(channel, bugname, NULL);
-        if (!channelIsClosing) {
-          switch_core_media_bug_remove(session, &bug);
-        }
-      }
+    // get the bug again, now that we are under lock. stop and the media bug close can both get here
+    // (a close can even be triggered by the bug removal below); only the first one still finds the bug
+    // and tears down, any other returns here.
+    bug = (switch_media_bug_t*) switch_channel_get_private(channel, bugname);
+    if (!bug) {
+      switch_mutex_unlock(tech_pvt->mutex);
+      return SWITCH_STATUS_FALSE;
     }
-
-    // delete any temp files
-    struct playout* playout = tech_pvt->playout;
-    while (playout) {
-      std::remove(playout->file);
-      free(playout->file);
-      struct playout *tmp = playout;
-      playout = playout->next;
-      free(tmp);
+    switch_channel_set_private(channel, bugname, NULL);
+    if (!channelIsClosing) {
+      switch_core_media_bug_remove(session, &bug);
     }
+    drachtio::AudioPipe *pAudioPipe = PipeHandle::get(tech_pvt);
 
-    if (pAudioPipe && text) pAudioPipe->bufferForSending(text);
+    // A final text is only worth sending on a live connection. Checking the state and then queueing is
+    // not atomic: the state may change in between, e.g. the connection drops. That is harmless, enqueueText
+    // re-checks the state under the queue lock and either queues the text (it is freed with the pipe
+    // if never sent) or rejects it, and we ignore the result because the pipe is closed right after.
+    if (pAudioPipe && text && pAudioPipe->getLwsState() == drachtio::AudioPipe::LWS_CLIENT_CONNECTED) pAudioPipe->enqueueText(text);
     if (pAudioPipe) pAudioPipe->close();
 
     destroy_tech_pvt(tech_pvt);
+    switch_mutex_unlock(tech_pvt->mutex);
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "(%u) fork_session_cleanup: connection closed\n", id);
     return SWITCH_STATUS_SUCCESS;
   }
@@ -683,8 +652,16 @@ extern "C" {
     private_t* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
   
     if (!tech_pvt) return SWITCH_STATUS_FALSE;
-    drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe *>(tech_pvt->pAudioPipe);
-    if (pAudioPipe && text) pAudioPipe->bufferForSending(text);
+    // the pipe handle is released under this mutex by fork_session_cleanup (null afterwards)
+    switch_mutex_lock(tech_pvt->mutex);
+    drachtio::AudioPipe *pAudioPipe = PipeHandle::get(tech_pvt);
+    bool failed = pAudioPipe && text && !pAudioPipe->enqueueText(text);
+    switch_mutex_unlock(tech_pvt->mutex);
+
+    if (failed) {
+      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "fork_session_send_text failed: text exceeds max length of %d bytes, send queue is full, or connection is closed\n", MAX_TEXT_LEN);
+      return SWITCH_STATUS_FALSE;
+    }
 
     return SWITCH_STATUS_SUCCESS;
   }
@@ -718,8 +695,11 @@ extern "C" {
 
     tech_pvt->graceful_shutdown = 1;
 
-    drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe *>(tech_pvt->pAudioPipe);
+    // the pipe handle is released under this mutex by fork_session_cleanup (null afterwards)
+    switch_mutex_lock(tech_pvt->mutex);
+    drachtio::AudioPipe *pAudioPipe = PipeHandle::get(tech_pvt);
     if (pAudioPipe) pAudioPipe->do_graceful_shutdown();
+    switch_mutex_unlock(tech_pvt->mutex);
 
     return SWITCH_STATUS_SUCCESS;
   }
@@ -733,12 +713,8 @@ extern "C" {
     if (!tech_pvt || tech_pvt->audio_paused || tech_pvt->graceful_shutdown) return SWITCH_TRUE;
     
     if (switch_mutex_trylock(tech_pvt->mutex) == SWITCH_STATUS_SUCCESS) {
-      if (!tech_pvt->pAudioPipe) {
-        switch_mutex_unlock(tech_pvt->mutex);
-        return SWITCH_TRUE;
-      }
-      drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe *>(tech_pvt->pAudioPipe);
-      if (pAudioPipe->getLwsState() != drachtio::AudioPipe::LWS_CLIENT_CONNECTED) {
+      drachtio::AudioPipe *pAudioPipe = PipeHandle::get(tech_pvt);
+      if (!pAudioPipe || pAudioPipe->getLwsState() != drachtio::AudioPipe::LWS_CLIENT_CONNECTED) {
         switch_mutex_unlock(tech_pvt->mutex);
         return SWITCH_TRUE;
       }
@@ -755,7 +731,7 @@ extern "C" {
           if (available < pAudioPipe->binaryMinSpace()) {
             if (!tech_pvt->buffer_overrun_notified) {
               tech_pvt->buffer_overrun_notified = 1;
-              tech_pvt->responseHandler(session, EVENT_BUFFER_OVERRUN, NULL);
+              tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_BUFFER_OVERRUN, NULL);
             }
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%u) dropping packets!\n", 
               tech_pvt->id);
@@ -782,7 +758,7 @@ extern "C" {
         frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
         while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
           if (frame.datalen) {
-            spx_uint32_t out_len = available >> 1;  // space for samples which are 2 bytes
+            spx_uint32_t out_len = available / (sizeof(spx_int16_t) * tech_pvt->channels);  // space for frames of 2 bytes per channel
             spx_uint32_t in_len = frame.samples;
 
             speex_resampler_process_interleaved_int(tech_pvt->resampler, 
@@ -793,7 +769,7 @@ extern "C" {
 
             if (out_len > 0) {
               // bytes written = num samples * 2 * num channels
-              size_t bytes_written = out_len << tech_pvt->channels;
+              size_t bytes_written = out_len * sizeof(spx_int16_t) * tech_pvt->channels;
               pAudioPipe->binaryWritePtrAdd(bytes_written);
               available = pAudioPipe->binarySpaceAvailable();
               dirty = true;
@@ -803,7 +779,7 @@ extern "C" {
                 tech_pvt->buffer_overrun_notified = 1;
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%u) dropping packets!\n", 
                   tech_pvt->id);
-                tech_pvt->responseHandler(session, EVENT_BUFFER_OVERRUN, NULL);
+                tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_BUFFER_OVERRUN, NULL);
               }
               break;
             }
@@ -817,40 +793,54 @@ extern "C" {
     return SWITCH_TRUE;
   }
 
+  // Write-replace callback of the media bug, called on the media thread for every outgoing frame (20 ms).
+  // Mixes the audio streamed in from the websocket (queued in StreamState::playout by processIncomingBinary
+  // on the lws thread) into the frame that is sent to the caller: it takes up to one frame of samples from
+  // the playout buffer, adds them to the frame and writes the frame back. If a killAudio cleared the buffer
+  // (clearPlayout), the buffered audio is dropped instead and this frame is left unchanged.
+  // Never blocks and never fails: when the session mutex or the playout buffer is busy, or the stream state
+  // is already released, the frame is passed on untouched and the buffered audio is played with the next frame.
   switch_bool_t dub_speech_frame(switch_media_bug_t *bug, private_t* tech_pvt) {
-    CircularBuffer_t *cBuffer = (CircularBuffer_t *) tech_pvt->streamingPlayoutBuffer;
     if (switch_mutex_trylock(tech_pvt->mutex) == SWITCH_STATUS_SUCCESS) {
+      // the stream state is released under tech_pvt->mutex by cleanup, so it is read under it here
+      StreamState* ss = StreamHandle::get(tech_pvt);
+      // like the session lock, the playout buffer is only tried: skip this frame rather than wait for the lws thread
+      std::unique_lock<std::mutex> playoutLock;
+      if (ss) playoutLock = std::unique_lock<std::mutex>(ss->playoutMutex, std::try_to_lock);
+      if (ss && playoutLock.owns_lock()) {
+        CircularBuffer_t *cBuffer = &ss->playout;
 
-      // if flag was set to clear the buffer, do so and clear the flag
-      if (tech_pvt->clear_bidirectional_audio_buffer) {
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "(%u) dub_speech_frame - clearing buffer\n", tech_pvt->id); 
-        cBuffer->clear();
-        tech_pvt->clear_bidirectional_audio_buffer = false;
-      }
-      else {
-        switch_frame_t* rframe = switch_core_media_bug_get_write_replace_frame(bug);
-        int16_t *fp = reinterpret_cast<int16_t*>(rframe->data);
-
-        rframe->channels = 1;
-        rframe->datalen = rframe->samples * sizeof(int16_t);
-
-        int16_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
-        memset(data, 0, sizeof(data));
-
-        int samplesToCopy = std::min(static_cast<int>(cBuffer->size()), static_cast<int>(rframe->samples));
-
-        //switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "(%u) dub_speech_frame - samples to copy %u\n", tech_pvt->id, samplesToCopy); 
-
-        std::copy_n(cBuffer->begin(), samplesToCopy, data);
-        cBuffer->erase(cBuffer->begin(), cBuffer->begin() + samplesToCopy);
-
-        if (samplesToCopy > 0) {
-          vector_add(fp, data, rframe->samples);
+        // if flag was set to clear the buffer, do so and clear the flag
+        if (ss->clearPlayout.exchange(false)) {
+          switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "(%u) dub_speech_frame - clearing buffer\n", tech_pvt->id); 
+          cBuffer->clear();
         }
-        vector_normalize(fp, rframe->samples);
+        else {
+          switch_frame_t* rframe = switch_core_media_bug_get_write_replace_frame(bug);
+          int16_t *fp = reinterpret_cast<int16_t*>(rframe->data);
 
-        switch_core_media_bug_set_write_replace_frame(bug, rframe);
+          rframe->channels = 1;
+          rframe->datalen = rframe->samples * sizeof(int16_t);
+
+          int16_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+          memset(data, 0, sizeof(data));
+
+          int samplesToCopy = std::min(static_cast<int>(cBuffer->size()), static_cast<int>(rframe->samples));
+
+          //switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "(%u) dub_speech_frame - samples to copy %u\n", tech_pvt->id, samplesToCopy); 
+
+          std::copy_n(cBuffer->begin(), samplesToCopy, data);
+          cBuffer->erase(cBuffer->begin(), cBuffer->begin() + samplesToCopy);
+
+          if (samplesToCopy > 0) {
+            vector_add(fp, data, rframe->samples);
+          }
+          vector_normalize(fp, rframe->samples);
+
+          switch_core_media_bug_set_write_replace_frame(bug, rframe);
+        }
       }
+      playoutLock = std::unique_lock<std::mutex>();
       switch_mutex_unlock(tech_pvt->mutex);
     }
     return SWITCH_TRUE;
@@ -865,11 +855,11 @@ extern "C" {
     }
     private_t* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
 
-    CircularBuffer_t *cBuffer = (CircularBuffer_t *) tech_pvt->streamingPlayoutBuffer;
-
     if (switch_mutex_trylock(tech_pvt->mutex) == SWITCH_STATUS_SUCCESS) {
-      if (cBuffer != nullptr) {
-        cBuffer->clear();
+      StreamState* ss = StreamHandle::get(tech_pvt);
+      if (ss) {
+        std::lock_guard<std::mutex> lk(ss->playoutMutex);
+        ss->playout.clear();
       }
       switch_mutex_unlock(tech_pvt->mutex);
     }

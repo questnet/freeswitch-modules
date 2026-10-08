@@ -24,12 +24,12 @@ Attaches media bug and starts streaming audio stream to the back-end server.  Au
 - `sampling-rate` - choice of
   - "8k" = 8000 Hz sample rate will be generated
   - "16k" = 16000 Hz sample rate will be generated
-- `metadata` - a text frame of arbitrary data to send to the back-end server immediately upon connecting.  Once this text frame has been sent, the incoming audio will be sent in binary frames to the server.
+- `metadata` - a text frame of arbitrary data to send to the back-end server immediately upon connecting.  Once this text frame has been sent, the incoming audio will be sent in binary frames to the server.  The metadata is limited to 1 MB (`MAX_TEXT_LEN`); longer metadata makes `start` fail.
 
 ```
 uuid_audio_fork <uuid> send_text <metadata>
 ```
-Send a text frame of arbitrary data to the remote server (e.g. this can be used to notify of DTMF events).
+Send a text frame of arbitrary data to the remote server (e.g. this can be used to notify of DTMF events).  Each call is sent as exactly one websocket text frame, limited to 1 MB (`MAX_TEXT_LEN`); longer text is rejected with an error, not truncated.
 
 ```
 uuid_audio_fork <uuid> stop <metadata>
@@ -39,35 +39,6 @@ Closes websocket connection and detaches media bug, optionally sending a final t
 ### Events
 An optional feature of this module is that it can receive JSON text frames from the server and generate associated events to an application.  The format of the JSON text frames and the associated events are described below.
 
-#### audio
-##### server JSON message
-The server can provide audio content to be played back to the caller by sending a JSON text frame like this:
-```json
-{
-	"type": "playAudio",
-	"data": {
-		"audioContentType": "raw",
-		"sampleRate": 8000,
-		"audioContent": "base64 encoded raw audio..",
-		"textContent": "Hi there!  How can we help?"
-	}
-}
-```
-The `audioContentType` value can be either `wave` or `raw`.  If the latter, then `sampleRate` must be specified.  The audio content itself is supplied as a base64 encoded string.  The `textContent` attribute can optionally contain the text of the prompt.  This allows an application to choose whether to play the raw audio or to use its own text-to-speech to play the text prompt.
-
-Note that the module does _not_ directly play out the raw audio.  Instead, it writes it to a temporary file and provides the path to the file in the event generated.  It is left to the application to play out this file if it wishes to do so.
-##### Freeswitch event generated
-**Name**: mod_audio_fork::play_audio
-**Body**: JSON string
-```
-{
-  "audioContentType": "raw",
-  "sampleRate": 8000,
-  "textContent": "Hi there!  How can we help?",
-  "file": "/tmp/7dd5e34e-5db4-4edb-a166-757e5d29b941_2.tmp.r8"
-}
-```
-Note the audioContent attribute has been replaced with the path to the file containing the audio.  This temporary file will be removed when the Freeswitch session ends.
 #### killAudio
 ##### server JSON message
 The server can provide a request to kill the current audio playback:
@@ -82,23 +53,6 @@ Any current audio being played to the caller will be immediately stopped.  The e
 **Name**: mod_audio_fork::kill_audio
 **Body**: JSON string - the data attribute from the server message
 
-
-#### transcription
-##### server JSON message
-The server can optionally provide transcriptions to the application in real-time:
-```json
-{
-	"type": "transcription",
-	"data": {
-    
-	}
-}
-```
-The transcription data can be any JSON object; for instance, a server may choose to return a transcript and an associated confidence level.  Whatever is provided as the `data` attribute will be attached to the generated event.
-
-##### Freeswitch event generated
-**Name**: mod_audio_fork::transcription
-**Body**: JSON string - the data attribute from the server message
 
 #### transfer
 ##### server JSON message
