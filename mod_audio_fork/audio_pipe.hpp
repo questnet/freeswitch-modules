@@ -36,7 +36,10 @@ namespace drachtio {
       BINARY
     };
     typedef void (*log_emit_function)(int level, const char *line);
-    typedef void (*notifyHandler_t)(const char *sessionId, const char* bugname, NotifyEvent_t event, const char* message, const char* binary, size_t binary_len );
+    // userData is the object the session handed to the constructor. It is only valid for the duration of
+    // the call, but stays alive at least that long even if the session has already let go of it, so
+    // it is the safe way for the lws thread to reach state that the session side may be tearing down
+    typedef void (*notifyHandler_t)(const char *sessionId, const char* bugname, NotifyEvent_t event, const char* message, const char* binary, size_t binary_len, void* userData);
 
     struct lws_per_vhost_data {
       struct lws_context *context;
@@ -51,7 +54,7 @@ namespace drachtio {
     // constructor: instances must be owned by a shared_ptr (std::make_shared)
     AudioPipe(const char* uuid, const char* host, unsigned int port, const char* path, int sslFlags, 
       size_t bufLen, size_t minFreespace, const char* username, const char* password, char* bugname,
-      int bidirectional_audio, notifyHandler_t callback);
+      int bidirectional_audio, notifyHandler_t callback, std::shared_ptr<void> userData);
     ~AudioPipe();  
 
     LwsState_t getLwsState(void) { return m_state; }
@@ -107,7 +110,11 @@ namespace drachtio {
     static std::thread serviceThread;
 
     static int lws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len); 
-    static struct lws_context *context;
+    // The lws context is created by the service thread (lws_service_thread), but addPendingConnect()
+    // reads it from whichever thread starts a call. Atomic so that read is not a data race.
+    // It is null until the service thread has created the context (a call started right after module load
+    // can see null), and it is not reset when the context is destroyed on unload.
+    static std::atomic<struct lws_context*> context;
     static std::string protocolName;
     static std::mutex mutex_connects;
     static std::mutex mutex_disconnects;
@@ -120,7 +127,11 @@ namespace drachtio {
     static log_emit_function logger;
 
     static std::mutex mapMutex;
-    static bool stopFlag;
+    // Module-wide, not per call: asks the lws service thread to exit its loop. Cleared by initialize()
+    // (module load), set by deinitialize() (module unload), and checked by lws_service_thread() each time
+    // lws_service() returns. It does not wake lws_service(), so the thread only notices it on the next lws event.
+    // Atomic because it is written by the unloading thread and read by the service thread.
+    static std::atomic<bool> stopFlag;
 
     static Ptr findAndRemovePendingConnect(struct lws *wsi);
     static Ptr findPendingConnect(struct lws *wsi);
@@ -132,6 +143,9 @@ namespace drachtio {
     static void processPendingWrites(void);
     
     bool connect_client(struct lws_per_vhost_data *vhd);
+    void notify(NotifyEvent_t event, const char* message, const char* binary, size_t len) {
+      m_callback(m_uuid.c_str(), m_bugname.c_str(), event, message, binary, len, m_userData.get());
+    }
 
     std::atomic<LwsState_t> m_state;
     std::string m_uuid;
@@ -153,6 +167,8 @@ namespace drachtio {
     size_t m_recv_buf_len;
     struct lws_per_vhost_data* m_vhd;
     notifyHandler_t m_callback;
+    // shared with the session; released with the pipe, i.e. after the last queued entry and lws callback is done
+    std::shared_ptr<void> m_userData;
     log_emit_function m_logger;
     std::string m_username;
     std::string m_password;

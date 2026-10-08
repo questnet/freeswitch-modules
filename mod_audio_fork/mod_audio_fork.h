@@ -12,9 +12,7 @@
 #define MAX_WS_URL_LEN (512)
 #define MAX_PATH_LEN (4096)
 
-#define EVENT_TRANSCRIPTION   "mod_audio_fork::transcription"
 #define EVENT_TRANSFER        "mod_audio_fork::transfer"
-#define EVENT_PLAY_AUDIO      "mod_audio_fork::play_audio"
 #define EVENT_KILL_AUDIO      "mod_audio_fork::kill_audio"
 #define EVENT_DISCONNECT      "mod_audio_fork::disconnect"
 #define EVENT_ERROR           "mod_audio_fork::error"
@@ -31,11 +29,6 @@
 // when longer than this limit.
 #define MAX_TEXT_LEN (1024 * 1024)
 
-struct playout {
-  char *file;
-  struct playout* next;
-};
-
 typedef void (*responseHandler_t)(switch_core_session_t* session, const char* bugname, const char* eventName, char* json);
 
 struct private_data {
@@ -50,7 +43,6 @@ struct private_data {
   unsigned int port;
   char path[MAX_PATH_LEN];
   int sampling;
-  struct playout* playout;
   int  channels;
   unsigned int id;
   int buffer_overrun_notified:1;
@@ -58,17 +50,12 @@ struct private_data {
   int graceful_shutdown:1;
 
   // bidirectional audio
-  void *streamingPlayoutBuffer;
-  void *streamingPreBuffer;
-  int streamingPreBufSize;
-  uint8_t set_aside_byte;
-  int has_set_aside_byte;
-  int downscale_factor;
-  SpeexResamplerState *bidirectional_audio_resampler;
+  // session-side reference to the shared StreamState (see lws_glue.cpp); the lws thread reaches the same
+  // object through the AudioPipe, so releasing this at cleanup does not free it under the lws thread
+  void *pStream;
   int bidirectional_audio_enable;
 	int bidirectional_audio_stream;
   int bidirectional_audio_sample_rate;
-  int clear_bidirectional_audio_buffer;
 };
 
 typedef struct private_data private_t;

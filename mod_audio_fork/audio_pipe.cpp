@@ -95,7 +95,7 @@ int AudioPipe::lws_callback(struct lws *wsi,
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,"AudioPipe::lws_service_thread LWS_CALLBACK_CLIENT_CONNECTION_ERROR: %s, response status %d\n", in ? (char *)in : "(null)", rc); 
         if (ap) {
           ap->m_state = LWS_CLIENT_FAILED;
-          ap->m_callback(ap->m_uuid.c_str(), ap->m_bugname.c_str(), AudioPipe::CONNECT_FAIL, (char *) in, NULL, len);
+          ap->notify(AudioPipe::CONNECT_FAIL, (char *) in, NULL, len);
         }
         else {
           switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,"AudioPipe::lws_service_thread LWS_CALLBACK_CLIENT_CONNECTION_ERROR unable to find wsi %p..\n", wsi); 
@@ -115,7 +115,7 @@ int AudioPipe::lws_callback(struct lws *wsi,
             ap->m_state = LWS_CLIENT_CONNECTED;
             if (!ap->m_text_queue.empty()) lws_callback_on_writable(wsi);
           }
-          ap->m_callback(ap->m_uuid.c_str(), ap->m_bugname.c_str(), AudioPipe::CONNECT_SUCCESS, NULL, NULL, len);
+          ap->notify(AudioPipe::CONNECT_SUCCESS, NULL, NULL, len);
         }
         else {
           switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,"AudioPipe::lws_service_thread LWS_CALLBACK_CLIENT_ESTABLISHED unable to find wsi %p..\n", wsi); 
@@ -131,12 +131,12 @@ int AudioPipe::lws_callback(struct lws *wsi,
         Ptr ap = **ppAp;
         if (ap->m_state == LWS_CLIENT_DISCONNECTING) {
           // closed by us
-          ap->m_callback(ap->m_uuid.c_str(), ap->m_bugname.c_str(), AudioPipe::CONNECTION_CLOSED_GRACEFULLY, NULL, NULL, len);
+          ap->notify(AudioPipe::CONNECTION_CLOSED_GRACEFULLY, NULL, NULL, len);
         }
         else if (ap->m_state == LWS_CLIENT_CONNECTED) {
           // closed by far end
           switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,"%s socket closed by far end\n", ap->m_uuid.c_str());
-          ap->m_callback(ap->m_uuid.c_str(), ap->m_bugname.c_str(), AudioPipe::CONNECTION_DROPPED, NULL, NULL, len);
+          ap->notify(AudioPipe::CONNECTION_DROPPED, NULL, NULL, len);
         }
         ap->m_state = LWS_CLIENT_DISCONNECTED;
         ap->m_wsi = nullptr;
@@ -164,7 +164,7 @@ int AudioPipe::lws_callback(struct lws *wsi,
 
         if (lws_frame_is_binary(wsi)) {
           if (len > 0 && ap->is_bidirectional_audio_stream()) {
-            ap->m_callback(ap->m_uuid.c_str(), ap->m_bugname.c_str(), AudioPipe::BINARY, NULL, (char *) in, len);
+            ap->notify(AudioPipe::BINARY, NULL, (char *) in, len);
           } else if (len > 0) {
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,"AudioPipe::lws_service_thread LWS_CALLBACK_CLIENT_RECEIVE received unexpected binary frame, discarding.\n");
           }
@@ -209,7 +209,7 @@ int AudioPipe::lws_callback(struct lws *wsi,
             if (lws_is_final_fragment(wsi)) {
               if (nullptr != ap->m_recv_buf) {
                 std::string msg((char *)ap->m_recv_buf, ap->m_recv_buf_ptr - ap->m_recv_buf);
-                ap->m_callback(ap->m_uuid.c_str(), ap->m_bugname.c_str(), AudioPipe::MESSAGE, msg.c_str(), NULL, len);
+                ap->notify(AudioPipe::MESSAGE, msg.c_str(), NULL, len);
                 if (nullptr != ap->m_recv_buf) free(ap->m_recv_buf);
               }
               ap->m_recv_buf = ap->m_recv_buf_ptr = nullptr;
@@ -301,7 +301,7 @@ static const lws_retry_bo_t retry = {
     0          // jitter_percent
 };
 
-struct lws_context *AudioPipe::context = nullptr;
+std::atomic<struct lws_context*> AudioPipe::context{nullptr};
 std::thread AudioPipe::serviceThread;
 std::string AudioPipe::protocolName;
 std::mutex AudioPipe::mutex_connects;
@@ -312,7 +312,7 @@ std::list<AudioPipe::Ptr> AudioPipe::pendingDisconnects;
 std::list<AudioPipe::Ptr> AudioPipe::pendingWrites;
 AudioPipe::log_emit_function AudioPipe::logger;
 std::mutex AudioPipe::mapMutex;
-bool AudioPipe::stopFlag;
+std::atomic<bool> AudioPipe::stopFlag{false};
 
 void AudioPipe::processPendingConnects(lws_per_vhost_data *vhd) {
   std::list<Ptr> connects;
@@ -405,7 +405,9 @@ void AudioPipe::addPendingConnect(Ptr ap) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,"%s after adding connect there are %lu pending connects\n", 
       ap->m_uuid.c_str(), pendingConnects.size());
   }
-  lws_cancel_service(context);
+  // the service thread has not created the context yet if this is the very first call after module load;
+  // the connect is queued already and the service thread wakes itself once the context exists
+  if (struct lws_context* ctx = context.load()) lws_cancel_service(ctx);
 }
 void AudioPipe::addPendingDisconnect(Ptr ap) {
   {
@@ -452,19 +454,23 @@ bool AudioPipe::lws_service_thread() {
 
   switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,"AudioPipe::lws_service_thread creating context\n");
 
-  context = lws_create_context(&info);
-  if (!context) {
+  struct lws_context* ctx = lws_create_context(&info);
+  context = ctx;
+  if (!ctx) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,"AudioPipe::lws_service_thread failed creating context\n"); 
     return false;
   }
 
+  // connects queued before the context existed could not wake the service loop
+  lws_cancel_service(ctx);
+
   int n;
   do {
-    n = lws_service(context, 0);
+    n = lws_service(ctx, 0);
   } while (n >= 0 && !stopFlag);
 
   lwsl_notice("AudioPipe::lws_service_thread ending\n"); 
-  lws_context_destroy(context);
+  lws_context_destroy(ctx);
 
   return true;
 }
@@ -492,11 +498,11 @@ bool AudioPipe::deinitialize() {
 // instance members
 AudioPipe::AudioPipe(const char* uuid, const char* host, unsigned int port, const char* path,
   int sslFlags, size_t bufLen, size_t minFreespace, const char* username, const char* password, char* bugname,
-  int bidirectional_audio_stream, notifyHandler_t callback) :
+  int bidirectional_audio_stream, notifyHandler_t callback, std::shared_ptr<void> userData) :
   m_uuid(uuid), m_host(host), m_port(port), m_path(path), m_sslFlags(sslFlags),
   m_audio_buffer_min_freespace(minFreespace), m_audio_buffer_max_len(bufLen), m_gracefulShutdown(false),
   m_audio_buffer_write_offset(LWS_PRE), m_recv_buf(nullptr), m_recv_buf_ptr(nullptr), m_bugname(bugname),
-  m_state(LWS_CLIENT_IDLE), m_wsi(nullptr), m_vhd(nullptr), m_callback(callback) {
+  m_state(LWS_CLIENT_IDLE), m_wsi(nullptr), m_vhd(nullptr), m_callback(callback), m_userData(std::move(userData)) {
 
   if (username && password) {
     m_username.assign(username);
