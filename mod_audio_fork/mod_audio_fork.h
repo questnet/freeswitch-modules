@@ -37,7 +37,7 @@ struct playout {
   struct playout* next;
 };
 
-typedef void (*responseHandler_t)(switch_core_session_t* session, const char* eventName, char* json);
+typedef void (*responseHandler_t)(switch_core_session_t* session, const char* bugname, const char* eventName, char* json);
 
 struct private_data {
 	switch_mutex_t *mutex;

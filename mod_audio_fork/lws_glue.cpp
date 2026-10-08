@@ -251,7 +251,7 @@ namespace {
           }
 
           char* jsonString = cJSON_PrintUnformatted(jsonData);
-          tech_pvt->responseHandler(session, EVENT_PLAY_AUDIO, jsonString);
+          tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_PLAY_AUDIO, jsonString);
           free(jsonString);
           if (jsonAudio) cJSON_Delete(jsonAudio);
         }
@@ -260,7 +260,7 @@ namespace {
         }
       }
       else if (0 == type.compare("killAudio")) {
-        tech_pvt->responseHandler(session, EVENT_KILL_AUDIO, NULL);
+        tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_KILL_AUDIO, NULL);
 
         // kill any current playback on the channel
         switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -271,27 +271,27 @@ namespace {
       }
       else if (0 == type.compare("transcription")) {
         char* jsonString = cJSON_PrintUnformatted(jsonData);
-        tech_pvt->responseHandler(session, EVENT_TRANSCRIPTION, jsonString);
+        tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_TRANSCRIPTION, jsonString);
         free(jsonString);        
       }
       else if (0 == type.compare("transfer")) {
         char* jsonString = cJSON_PrintUnformatted(jsonData);
-        tech_pvt->responseHandler(session, EVENT_TRANSFER, jsonString);
+        tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_TRANSFER, jsonString);
         free(jsonString);                
       }
       else if (0 == type.compare("disconnect")) {
         char* jsonString = cJSON_PrintUnformatted(jsonData);
-        tech_pvt->responseHandler(session, EVENT_DISCONNECT, jsonString);
+        tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_DISCONNECT, jsonString);
         free(jsonString);        
       }
       else if (0 == type.compare("error")) {
         char* jsonString = cJSON_PrintUnformatted(jsonData);
-        tech_pvt->responseHandler(session, EVENT_ERROR, jsonString);
+        tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_ERROR, jsonString);
         free(jsonString);        
       }
       else if (0 == type.compare("json")) {
         char* jsonString = cJSON_PrintUnformatted(json);
-        tech_pvt->responseHandler(session, EVENT_JSON, jsonString);
+        tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_JSON, jsonString);
         free(jsonString);
       }
       else {
@@ -315,7 +315,7 @@ namespace {
           switch (event) {
             case drachtio::AudioPipe::CONNECT_SUCCESS:
               switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "connection successful\n");
-              tech_pvt->responseHandler(session, EVENT_CONNECT_SUCCESS, NULL);
+              tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_CONNECT_SUCCESS, NULL);
             break;
             case drachtio::AudioPipe::CONNECT_FAIL:
             {
@@ -323,14 +323,14 @@ namespace {
               std::stringstream json;
               json << "{\"reason\":\"" << message << "\"}";
               tech_pvt->pAudioPipe = nullptr;
-              tech_pvt->responseHandler(session, EVENT_CONNECT_FAIL, (char *) json.str().c_str());
+              tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_CONNECT_FAIL, (char *) json.str().c_str());
               switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "connection failed: %s\n", message);
             }
             break;
             case drachtio::AudioPipe::CONNECTION_DROPPED:
               // first thing: we can no longer access the AudioPipe
               tech_pvt->pAudioPipe = nullptr;
-              tech_pvt->responseHandler(session, EVENT_DISCONNECT, NULL);
+              tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_DISCONNECT, NULL);
               switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "connection dropped from far end\n");
             break;
             case drachtio::AudioPipe::CONNECTION_CLOSED_GRACEFULLY:
@@ -762,7 +762,7 @@ extern "C" {
           if (available < pAudioPipe->binaryMinSpace()) {
             if (!tech_pvt->buffer_overrun_notified) {
               tech_pvt->buffer_overrun_notified = 1;
-              tech_pvt->responseHandler(session, EVENT_BUFFER_OVERRUN, NULL);
+              tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_BUFFER_OVERRUN, NULL);
             }
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%u) dropping packets!\n", 
               tech_pvt->id);
@@ -810,7 +810,7 @@ extern "C" {
                 tech_pvt->buffer_overrun_notified = 1;
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%u) dropping packets!\n", 
                   tech_pvt->id);
-                tech_pvt->responseHandler(session, EVENT_BUFFER_OVERRUN, NULL);
+                tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_BUFFER_OVERRUN, NULL);
               }
               break;
             }
