@@ -9,13 +9,16 @@
 #include <queue>
 #include <unordered_map>
 #include <thread>
+#include <memory>
 
 #include <libwebsockets.h>
 
 namespace drachtio {
 
-  class AudioPipe {
+  class AudioPipe : public std::enable_shared_from_this<AudioPipe> {
   public:
+    using Ptr = std::shared_ptr<AudioPipe>;
+
     enum LwsState_t {
       LWS_CLIENT_IDLE,
       LWS_CLIENT_CONNECTING,
@@ -45,7 +48,7 @@ namespace drachtio {
     static bool deinitialize();
     static bool lws_service_thread();
 
-    // constructor
+    // constructor: instances must be owned by a shared_ptr (std::make_shared)
     AudioPipe(const char* uuid, const char* host, unsigned int port, const char* path, int sslFlags, 
       size_t bufLen, size_t minFreespace, const char* username, const char* password, char* bugname,
       int bidirectional_audio, notifyHandler_t callback);
@@ -109,19 +112,21 @@ namespace drachtio {
     static std::mutex mutex_connects;
     static std::mutex mutex_disconnects;
     static std::mutex mutex_writes;
-    static std::list<AudioPipe*> pendingConnects;
-    static std::list<AudioPipe*> pendingDisconnects;
-    static std::list<AudioPipe*> pendingWrites;
+    // the pending lists and the lws per-connection slot own references, so a pipe stays alive until
+    // every queued entry has been processed, regardless of when the session side lets go of it
+    static std::list<Ptr> pendingConnects;
+    static std::list<Ptr> pendingDisconnects;
+    static std::list<Ptr> pendingWrites;
     static log_emit_function logger;
 
     static std::mutex mapMutex;
     static bool stopFlag;
 
-    static AudioPipe* findAndRemovePendingConnect(struct lws *wsi);
-    static AudioPipe* findPendingConnect(struct lws *wsi);
-    static void addPendingConnect(AudioPipe* ap);
-    static void addPendingDisconnect(AudioPipe* ap);
-    static void addPendingWrite(AudioPipe* ap);
+    static Ptr findAndRemovePendingConnect(struct lws *wsi);
+    static Ptr findPendingConnect(struct lws *wsi);
+    static void addPendingConnect(Ptr ap);
+    static void addPendingDisconnect(Ptr ap);
+    static void addPendingWrite(Ptr ap);
     static void processPendingConnects(lws_per_vhost_data *vhd);
     static void processPendingDisconnects(lws_per_vhost_data *vhd);
     static void processPendingWrites(void);

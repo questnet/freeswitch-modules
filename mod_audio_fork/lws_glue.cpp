@@ -5,6 +5,7 @@
 #include <mutex>
 #include <thread>
 #include <list>
+#include <memory>
 #include <algorithm>
 #include <functional>
 #include <cassert>
@@ -37,6 +38,16 @@ namespace {
   static unsigned int nServiceThreads = std::max(1, std::min(requestedNumServiceThreads ? ::atoi(requestedNumServiceThreads) : 1, 5));
   static unsigned int idxCallCount = 0;
   static uint32_t playCount = 0;
+
+  // private_t is a plain C struct shared with mod_audio_fork.c, so pAudioPipe points to a heap-allocated
+  // shared_ptr. The session side keeps its reference until destroy_tech_pvt; a pipe whose connection has
+  // ended is detected by its state, not by a null pointer.
+  typedef std::shared_ptr<drachtio::AudioPipe> AudioPipePtr;
+
+  drachtio::AudioPipe* getPipe(const private_t* tech_pvt) {
+    AudioPipePtr* holder = static_cast<AudioPipePtr*>(tech_pvt->pAudioPipe);
+    return holder ? holder->get() : nullptr;
+  }
 
   switch_status_t processIncomingBinary(private_t* tech_pvt, switch_core_session_t* session, const char* message, size_t dataLength) {
     std::vector<uint8_t> data;
@@ -323,23 +334,17 @@ namespace {
             break;
             case drachtio::AudioPipe::CONNECT_FAIL:
             {
-              // first thing: we can no longer access the AudioPipe
               std::stringstream json;
               json << "{\"reason\":\"" << message << "\"}";
-              tech_pvt->pAudioPipe = nullptr;
               tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_CONNECT_FAIL, (char *) json.str().c_str());
               switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "connection failed: %s\n", message);
             }
             break;
             case drachtio::AudioPipe::CONNECTION_DROPPED:
-              // first thing: we can no longer access the AudioPipe
-              tech_pvt->pAudioPipe = nullptr;
               tech_pvt->responseHandler(session, tech_pvt->bugname, EVENT_DISCONNECT, NULL);
               switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "connection dropped from far end\n");
             break;
             case drachtio::AudioPipe::CONNECTION_CLOSED_GRACEFULLY:
-              // first thing: we can no longer access the AudioPipe
-              tech_pvt->pAudioPipe = nullptr;
               switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "connection closed gracefully\n");
             break;
             case drachtio::AudioPipe::MESSAGE:
@@ -404,20 +409,15 @@ namespace {
     
     size_t buflen = LWS_PRE + (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PACKETIZATION_PERIOD * nAudioBufferSecs);
 
-    drachtio::AudioPipe* ap = new drachtio::AudioPipe(tech_pvt->sessionId, host, port, path, sslFlags, 
+    AudioPipePtr ap = std::make_shared<drachtio::AudioPipe>(tech_pvt->sessionId, host, port, path, sslFlags, 
       buflen, read_impl.decoded_bytes_per_packet, username, password, bugname, bidirectional_audio_stream_enable, eventCallback);
-    if (!ap) {
-      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error allocating AudioPipe\n");
-      return SWITCH_STATUS_FALSE;
-    }
 
     if (metadata && *metadata && !ap->enqueueText(metadata)) {
       switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "metadata exceeds max length of %d bytes\n", MAX_TEXT_LEN);
-      delete ap;
       return SWITCH_STATUS_FALSE;
     }
 
-    tech_pvt->pAudioPipe = static_cast<void *>(ap);
+    tech_pvt->pAudioPipe = static_cast<void *>(new AudioPipePtr(ap));
 
     switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 
@@ -449,6 +449,10 @@ namespace {
 
   void destroy_tech_pvt(private_t* tech_pvt) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s (%u) destroy_tech_pvt\n", tech_pvt->sessionId, tech_pvt->id);
+    if (tech_pvt->pAudioPipe) {
+      delete static_cast<AudioPipePtr*>(tech_pvt->pAudioPipe);
+      tech_pvt->pAudioPipe = nullptr;
+    }
     if (tech_pvt->resampler) {
       speex_resampler_destroy(tech_pvt->resampler);
       tech_pvt->resampler = nullptr;
@@ -626,7 +630,8 @@ extern "C" {
 
    switch_status_t fork_session_connect(void **ppUserData) {
     private_t *tech_pvt = static_cast<private_t *>(*ppUserData);
-    drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe*>(tech_pvt->pAudioPipe);
+    drachtio::AudioPipe *pAudioPipe = getPipe(tech_pvt);
+    if (!pAudioPipe) return SWITCH_STATUS_FALSE;
     pAudioPipe->connect();
     return SWITCH_STATUS_SUCCESS;
   }
@@ -644,7 +649,7 @@ extern "C" {
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%u) fork_session_cleanup\n", id);
 
     if (!tech_pvt) return SWITCH_STATUS_FALSE;
-    drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe *>(tech_pvt->pAudioPipe);
+    drachtio::AudioPipe *pAudioPipe = getPipe(tech_pvt);
       
     switch_mutex_lock(tech_pvt->mutex);
 
@@ -691,7 +696,7 @@ extern "C" {
     private_t* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
   
     if (!tech_pvt) return SWITCH_STATUS_FALSE;
-    drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe *>(tech_pvt->pAudioPipe);
+    drachtio::AudioPipe *pAudioPipe = getPipe(tech_pvt);
     if (pAudioPipe && text && !pAudioPipe->enqueueText(text)) {
       switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "fork_session_send_text failed: text exceeds max length of %d bytes, send queue is full, or connection is closed\n", MAX_TEXT_LEN);
       return SWITCH_STATUS_FALSE;
@@ -729,7 +734,7 @@ extern "C" {
 
     tech_pvt->graceful_shutdown = 1;
 
-    drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe *>(tech_pvt->pAudioPipe);
+    drachtio::AudioPipe *pAudioPipe = getPipe(tech_pvt);
     if (pAudioPipe) pAudioPipe->do_graceful_shutdown();
 
     return SWITCH_STATUS_SUCCESS;
@@ -748,7 +753,7 @@ extern "C" {
         switch_mutex_unlock(tech_pvt->mutex);
         return SWITCH_TRUE;
       }
-      drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe *>(tech_pvt->pAudioPipe);
+      drachtio::AudioPipe *pAudioPipe = getPipe(tech_pvt);
       if (pAudioPipe->getLwsState() != drachtio::AudioPipe::LWS_CLIENT_CONNECTED) {
         switch_mutex_unlock(tech_pvt->mutex);
         return SWITCH_TRUE;
