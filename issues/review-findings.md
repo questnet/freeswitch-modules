@@ -14,11 +14,11 @@ Status is kept up to date as items are fixed. Items not touched since the origin
 - [x] **Unterminated strings.** `parse_ws_uri` no longer copies the URI into a fixed buffer, rejects hosts/paths that do not fit and copies with `switch_copy_string`; the caller's buffers are zero-initialised. `sessionId` is a session-pool string like `bugname`, and the unused `host`/`path`/`port` fields of `private_t` are gone.
 - [x] **Unbounded memory growth on inbound binary.** The pipe accepts binary only if enable, stream and sample rate are all set (the condition for `SMBF_WRITE_REPLACE`); `enable` now defaults to 0. The playout buffer is deliberately left uncapped (long streamed playout is wanted). Not built or run.
 - [x] **Mixing wrapped instead of clipping.** `vector_add` now saturates in the AVX2, SSE2 and scalar paths (`adds_epi16` / clamped scalar add); unit test added and passing for scalar and SSE2. The AVX2 path is not built by the test targets.
+- [x] **Module unload could hang.** `deinitialize` now calls `lws_cancel_service` after setting `stopFlag` (if the context does not exist yet the service thread wakes itself and sees the flag), and the service thread resets `context` to null before `lws_context_destroy`. Not built or run. Still open: `fork_cleanup` does not close live pipes, so unloading with calls in progress is not clean.
 
 ## Medium
 
 - [ ] **Graceful shutdown blocks closing.** After `graceful-shutdown` the WRITEABLE handler returns early on `isGracefulShutdown()` and never reaches the `DISCONNECTING` branch, so a later `stop` cannot close our side. Also logged at ERROR for a normal event.
-- [ ] **Module unload can hang.** `deinitialize` sets `stopFlag` and joins but never calls `lws_cancel_service`; the thread blocks in `lws_service(context, 0)`. `fork_cleanup` does not close live pipes. `context` is not reset after `lws_context_destroy`.
 
 ## Low
 

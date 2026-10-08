@@ -113,7 +113,7 @@ namespace drachtio {
     // The lws context is created by the service thread (lws_service_thread), but addPendingConnect()
     // reads it from whichever thread starts a call. Atomic so that read is not a data race.
     // It is null until the service thread has created the context (a call started right after module load
-    // can see null), and it is not reset when the context is destroyed on unload.
+    // can see null), and it is reset to null by the service thread before the context is destroyed on unload.
     static std::atomic<struct lws_context*> context;
     static std::string protocolName;
     static std::mutex mutex_connects;
@@ -129,7 +129,7 @@ namespace drachtio {
     static std::mutex mapMutex;
     // Module-wide, not per call: asks the lws service thread to exit its loop. Cleared by initialize()
     // (module load), set by deinitialize() (module unload), and checked by lws_service_thread() each time
-    // lws_service() returns. It does not wake lws_service(), so the thread only notices it on the next lws event.
+    // lws_service() returns. Setting it does not wake lws_service(), so deinitialize() also calls lws_cancel_service().
     // Atomic because it is written by the unloading thread and read by the service thread.
     static std::atomic<bool> stopFlag;
 

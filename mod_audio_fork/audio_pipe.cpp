@@ -486,6 +486,8 @@ bool AudioPipe::lws_service_thread() {
   } while (n >= 0 && !stopFlag);
 
   lwsl_notice("AudioPipe::lws_service_thread ending\n"); 
+  // addPendingConnect() must not wake a context that is about to be destroyed
+  context = nullptr;
   lws_context_destroy(ctx);
 
   return true;
@@ -505,6 +507,9 @@ bool AudioPipe::deinitialize() {
   switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,"AudioPipe::deinitialize\n"); 
   std::lock_guard<std::mutex> lock(mapMutex);
   stopFlag = true;
+  // lws_service(ctx, 0) blocks until an lws event; wake it so it sees stopFlag. If the context does not exist
+  // yet, the service thread wakes itself once it has created it and then sees stopFlag.
+  if (struct lws_context* ctx = context.load()) lws_cancel_service(ctx);
   if (serviceThread.joinable()) {
     serviceThread.join();
   }
