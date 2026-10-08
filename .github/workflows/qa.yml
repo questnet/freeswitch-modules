@@ -2,7 +2,9 @@ name: qa
 
 on:
   push:
+    branches: [questnet]
   pull_request:
+  workflow_dispatch:
 
 # a new push to the same branch or PR cancels the runs still in progress
 concurrency:
