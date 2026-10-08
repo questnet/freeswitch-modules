@@ -126,7 +126,6 @@ namespace drachtio {
     static std::list<Ptr> pendingWrites;
     static log_emit_function logger;
 
-    static std::mutex mapMutex;
     // Module-wide, not per call: asks the lws service thread to exit its loop. Cleared by initialize()
     // (module load), set by deinitialize() (module unload), and checked by lws_service_thread() each time
     // lws_service() returns. Setting it does not wake lws_service(), so deinitialize() also calls lws_cancel_service().

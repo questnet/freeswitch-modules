@@ -318,7 +318,6 @@ std::list<AudioPipe::Ptr> AudioPipe::pendingConnects;
 std::list<AudioPipe::Ptr> AudioPipe::pendingDisconnects;
 std::list<AudioPipe::Ptr> AudioPipe::pendingWrites;
 AudioPipe::log_emit_function AudioPipe::logger;
-std::mutex AudioPipe::mapMutex;
 std::atomic<bool> AudioPipe::stopFlag{false};
 
 void AudioPipe::processPendingConnects(lws_per_vhost_data *vhd) {
@@ -498,14 +497,12 @@ void AudioPipe::initialize(const char* protocol, int loglevel, log_emit_function
   lws_set_log_level(loglevel, logger);
 
   switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,"AudioPipe::initialize starting\n"); 
-  std::lock_guard<std::mutex> lock(mapMutex);
   stopFlag = false;
   serviceThread = std::thread(&AudioPipe::lws_service_thread);
 }
 
 bool AudioPipe::deinitialize() {
   switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,"AudioPipe::deinitialize\n"); 
-  std::lock_guard<std::mutex> lock(mapMutex);
   stopFlag = true;
   // lws_service(ctx, 0) blocks until an lws event; wake it so it sees stopFlag. If the context does not exist
   // yet, the service thread wakes itself once it has created it and then sees stopFlag.
