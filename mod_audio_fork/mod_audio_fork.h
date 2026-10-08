@@ -24,7 +24,13 @@
 #define EVENT_BUFFER_OVERRUN  "mod_audio_fork::buffer_overrun"
 #define EVENT_JSON            "mod_audio_fork::json"
 
-#define MAX_METADATA_LEN (8192)
+// Max length in bytes of the start metadata and of each send_text message.
+// Both used to be limited/unbounded by accident: the start metadata was copied into a fixed
+// 8K char array (silently truncated), and send_text text was unbounded and copied into a
+// stack array when written, which could overflow the stack for large messages.
+// Now both are held on the heap and rejected (never truncated, as truncated JSON is invalid)
+// when longer than this limit.
+#define MAX_TEXT_LEN (1024 * 1024)
 
 struct playout {
   char *file;
@@ -51,7 +57,6 @@ struct private_data {
   int buffer_overrun_notified:1;
   int audio_paused:1;
   int graceful_shutdown:1;
-  char initialMetadata[8192];
 
   // bidirectional audio
   void *streamingPlayoutBuffer;

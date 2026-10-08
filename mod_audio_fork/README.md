@@ -24,12 +24,12 @@ Attaches media bug and starts streaming audio stream to the back-end server.  Au
 - `sampling-rate` - choice of
   - "8k" = 8000 Hz sample rate will be generated
   - "16k" = 16000 Hz sample rate will be generated
-- `metadata` - a text frame of arbitrary data to send to the back-end server immediately upon connecting.  Once this text frame has been sent, the incoming audio will be sent in binary frames to the server.
+- `metadata` - a text frame of arbitrary data to send to the back-end server immediately upon connecting.  Once this text frame has been sent, the incoming audio will be sent in binary frames to the server.  The metadata is limited to 1 MB (`MAX_TEXT_LEN`); longer metadata makes `start` fail.
 
 ```
 uuid_audio_fork <uuid> send_text <metadata>
 ```
-Send a text frame of arbitrary data to the remote server (e.g. this can be used to notify of DTMF events).
+Send a text frame of arbitrary data to the remote server (e.g. this can be used to notify of DTMF events).  Each call is sent as exactly one websocket text frame, limited to 1 MB (`MAX_TEXT_LEN`); longer text is rejected with an error, not truncated.
 
 ```
 uuid_audio_fork <uuid> stop <metadata>

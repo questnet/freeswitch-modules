@@ -316,10 +316,10 @@ namespace {
             case drachtio::AudioPipe::CONNECT_SUCCESS:
               switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "connection successful\n");
               tech_pvt->responseHandler(session, EVENT_CONNECT_SUCCESS, NULL);
-              if (strlen(tech_pvt->initialMetadata) > 0) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "sending initial metadata %s\n", tech_pvt->initialMetadata);
+              {
+                // switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "sending initial metadata\n");
                 drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe *>(tech_pvt->pAudioPipe);
-                pAudioPipe->bufferForSending(tech_pvt->initialMetadata);
+                pAudioPipe->sendInitialMessage();
               }
             break;
             case drachtio::AudioPipe::CONNECT_FAIL:
@@ -402,7 +402,6 @@ namespace {
     tech_pvt->streamingPreBuffer = (void *) new CircularBuffer_t(8192);
 
     strncpy(tech_pvt->bugname, bugname, MAX_BUG_LEN);
-    if (metadata) strncpy(tech_pvt->initialMetadata, metadata, MAX_METADATA_LEN);
     
     size_t buflen = LWS_PRE + (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PACKETIZATION_PERIOD * nAudioBufferSecs);
 
@@ -410,6 +409,12 @@ namespace {
       buflen, read_impl.decoded_bytes_per_packet, username, password, bugname, bidirectional_audio_stream_enable, eventCallback);
     if (!ap) {
       switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error allocating AudioPipe\n");
+      return SWITCH_STATUS_FALSE;
+    }
+
+    if (metadata && !ap->setInitialMessage(metadata)) {
+      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "metadata exceeds max length of %d bytes\n", MAX_TEXT_LEN);
+      delete ap;
       return SWITCH_STATUS_FALSE;
     }
 
@@ -684,7 +689,10 @@ extern "C" {
   
     if (!tech_pvt) return SWITCH_STATUS_FALSE;
     drachtio::AudioPipe *pAudioPipe = static_cast<drachtio::AudioPipe *>(tech_pvt->pAudioPipe);
-    if (pAudioPipe && text) pAudioPipe->bufferForSending(text);
+    if (pAudioPipe && text && !pAudioPipe->bufferForSending(text)) {
+      switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "fork_session_send_text failed because text exceeds max length of %d bytes\n", MAX_TEXT_LEN);
+      return SWITCH_STATUS_FALSE;
+    }
 
     return SWITCH_STATUS_SUCCESS;
   }

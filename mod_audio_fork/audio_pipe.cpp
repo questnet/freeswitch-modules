@@ -1,5 +1,7 @@
 #include "audio_pipe.hpp"
+#include "mod_audio_fork.h"
 #include <switch.h>
+#include <vector>
 
 #include <cassert>
 #include <iostream>
@@ -227,12 +229,16 @@ int AudioPipe::lws_callback(struct lws *wsi,
         // check for text frames to send
         {
           std::lock_guard<std::mutex> lk(ap->m_text_mutex);
-          if (ap->m_metadata.length() > 0) {
-            uint8_t buf[ap->m_metadata.length() + LWS_PRE];
-            memcpy(buf + LWS_PRE, ap->m_metadata.c_str(), ap->m_metadata.length());
-            int n = ap->m_metadata.length();
-            int m = lws_write(wsi, buf + LWS_PRE, n, LWS_WRITE_TEXT);
-            ap->m_metadata.clear();
+          if (!ap->m_text_queue.empty()) {
+            // One queued message per websocket frame: send_text calls must never be merged.
+            // The buffer is on the heap (not a stack array) because messages can be up to MAX_TEXT_LEN.
+            // A short lws_write is buffered by lws itself, so one write per writeable event is enough.
+            std::string text = std::move(ap->m_text_queue.front());
+            ap->m_text_queue.pop_front();
+            std::vector<uint8_t> buf(LWS_PRE + text.length());
+            memcpy(buf.data() + LWS_PRE, text.data(), text.length());
+            int n = text.length();
+            int m = lws_write(wsi, buf.data() + LWS_PRE, n, LWS_WRITE_TEXT);
             if (m < n) {
               return -1;
             }
@@ -525,13 +531,27 @@ bool AudioPipe::connect_client(struct lws_per_vhost_data *vhd) {
   return nullptr != m_wsi;
 }
 
-void AudioPipe::bufferForSending(const char* text) {
-  if (m_state != LWS_CLIENT_CONNECTED) return;
+bool AudioPipe::bufferForSending(const char* text) {
+  if (strlen(text) > MAX_TEXT_LEN) return false;
+  if (m_state != LWS_CLIENT_CONNECTED) return true;
   {
     std::lock_guard<std::mutex> lk(m_text_mutex);
-    m_metadata.append(text);
+    m_text_queue.emplace_back(text);
   }
   addPendingWrite(this);
+  return true;
+}
+
+bool AudioPipe::setInitialMessage(const char* text) {
+  if (strlen(text) > MAX_TEXT_LEN) return false;
+  m_initial_message = text;
+  return true;
+}
+
+void AudioPipe::sendInitialMessage(void) {
+  if (m_initial_message.empty()) return;
+  bufferForSending(m_initial_message.c_str());
+  m_initial_message.clear();
 }
 
 void AudioPipe::unlockAudioBuffer() {

@@ -3,6 +3,7 @@
 
 #include <string>
 #include <list>
+#include <deque>
 #include <mutex>
 #include <queue>
 #include <unordered_map>
@@ -51,7 +52,11 @@ namespace drachtio {
 
     LwsState_t getLwsState(void) { return m_state; }
     void connect(void);
-    void bufferForSending(const char* text);
+    // queues text as one websocket text frame, returns false if it exceeds MAX_TEXT_LEN
+    bool bufferForSending(const char* text);
+    // stores text to be sent as the first frame once connected, returns false if it exceeds MAX_TEXT_LEN
+    bool setInitialMessage(const char* text);
+    void sendInitialMessage(void);
     size_t binarySpaceAvailable(void) {
       return m_audio_buffer_max_len - m_audio_buffer_write_offset;
     }
@@ -130,7 +135,8 @@ namespace drachtio {
     std::string m_bugname;
     unsigned int m_port;
     std::string m_path;
-    std::string m_metadata;
+    std::deque<std::string> m_text_queue;
+    std::string m_initial_message;
     std::mutex m_text_mutex;
     std::mutex m_audio_mutex;
     int m_sslFlags;
