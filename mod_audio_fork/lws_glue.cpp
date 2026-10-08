@@ -396,7 +396,7 @@ namespace {
     tech_pvt->streamingPreBufSize = 320 * tech_pvt->downscale_factor * 4; // min 80ms prebuffer
     tech_pvt->streamingPreBuffer = (void *) new CircularBuffer_t(8192);
 
-    strncpy(tech_pvt->bugname, bugname, MAX_BUG_LEN);
+    tech_pvt->bugname = switch_core_session_strdup(session, bugname);
     
     size_t buflen = LWS_PRE + (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PACKETIZATION_PERIOD * nAudioBufferSecs);
 
