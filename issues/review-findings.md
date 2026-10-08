@@ -13,12 +13,12 @@ Status is kept up to date as items are fixed. Items not touched since the origin
 - [x] **Leaks / sockets left open.** `close()` on a pipe that is `IDLE` or `CONNECTING` is remembered (`m_closeRequested`) and honoured: an `IDLE` pipe never connects, a `CONNECTING` one is closed in `ESTABLISHED`. `connect_client` failing emits `CONNECT_FAIL` and drops the pipe from the pending list. `start_capture` destroys the session data when `media_bug_add` fails and runs the full cleanup when connecting fails. `fork_data_init` failure paths audited: `destroy_tech_pvt` is safe there. `CLIENT_CONNECTION_ERROR` already removed the pipe from the pending list.
 - [x] **Unterminated strings.** `parse_ws_uri` no longer copies the URI into a fixed buffer, rejects hosts/paths that do not fit and copies with `switch_copy_string`; the caller's buffers are zero-initialised. `sessionId` is a session-pool string like `bugname`, and the unused `host`/`path`/`port` fields of `private_t` are gone.
 - [x] **Unbounded memory growth on inbound binary.** The pipe accepts binary only if enable, stream and sample rate are all set (the condition for `SMBF_WRITE_REPLACE`); `enable` now defaults to 0. The playout buffer is deliberately left uncapped (long streamed playout is wanted). Not built or run.
+- [x] **Mixing wrapped instead of clipping.** `vector_add` now saturates in the AVX2, SSE2 and scalar paths (`adds_epi16` / clamped scalar add); unit test added and passing for scalar and SSE2. The AVX2 path is not built by the test targets.
 
 ## Medium
 
 - [ ] **Graceful shutdown blocks closing.** After `graceful-shutdown` the WRITEABLE handler returns early on `isGracefulShutdown()` and never reaches the `DISCONNECTING` branch, so a later `stop` cannot close our side. Also logged at ERROR for a normal event.
 - [ ] **Module unload can hang.** `deinitialize` sets `stopFlag` and joins but never calls `lws_cancel_service`; the thread blocks in `lws_service(context, 0)`. `fork_cleanup` does not close live pipes. `context` is not reset after `lws_context_destroy`.
-- [ ] **Mixing wraps instead of clipping.** `vector_add` uses wrapping `_mm256_add_epi16` (and `a[i] += b[i]` in the tail); `vector_normalize` then clamps already-wrapped values and is effectively a no-op. Use saturating adds (`_mm256_adds_epi16`). Only the AVX2 path and scalar tail were checked.
 
 ## Low
 

@@ -30,6 +30,18 @@ static void test_vector_add() {
   assert(a == expect);
 }
 
+static void test_vector_add_saturates() {
+  // 37 samples cover the SIMD blocks and the scalar tail
+  std::vector<int16_t> a(37), b(37), expect(37);
+  for (size_t i = 0; i < a.size(); i++) {
+    if (i % 3 == 0) { a[i] = 30000; b[i] = 10000; expect[i] = 32767; }
+    else if (i % 3 == 1) { a[i] = -30000; b[i] = -10000; expect[i] = -32768; }
+    else { a[i] = 12345; b[i] = -2345; expect[i] = 10000; }
+  }
+  vector_add(a.data(), b.data(), a.size());
+  assert(a == expect);
+}
+
 static void test_vector_normalize() {
   std::vector<int16_t> a = {0, 1, -1, 32767, -32768, 100, -100};
   std::vector<int16_t> expect(a);
@@ -65,6 +77,7 @@ static void test_volume() {
 int main() {
   test_base64();
   test_vector_add();
+  test_vector_add_saturates();
   test_vector_normalize();
 #ifndef USE_SSE2
   test_volume();

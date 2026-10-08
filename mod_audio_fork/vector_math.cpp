@@ -7,6 +7,11 @@
 #define SMAX 32767
 #define SMIN (-32768)
 #define normalize_to_16bit_basic(n) if (n > SMAX) n = SMAX; else if (n < SMIN) n = SMIN;
+// saturating 16 bit add, matches _mm_adds_epi16 / _mm256_adds_epi16
+static inline int16_t add_saturate_16bit(int16_t x, int16_t y) {
+  int32_t sum = (int32_t)x + (int32_t)y;
+  return (int16_t)(sum > SMAX ? SMAX : (sum < SMIN ? SMIN : sum));
+}
 #define normalize_volume_granular(x) if (x > GRANULAR_VOLUME_MAX) x = GRANULAR_VOLUME_MAX; if (x < -GRANULAR_VOLUME_MAX) x = -GRANULAR_VOLUME_MAX;
 
 #ifdef __cplusplus
@@ -21,11 +26,11 @@ void vector_add(int16_t* a, int16_t* b, size_t len) {
     for (; i + 15 < len; i += 16) {
         __m256i va = _mm256_loadu_si256((const __m256i*)(a + i));
         __m256i vb = _mm256_loadu_si256((const __m256i*)(b + i));
-        __m256i vc = _mm256_add_epi16(va, vb);
+        __m256i vc = _mm256_adds_epi16(va, vb);
         _mm256_storeu_si256((__m256i*)(a + i), vc);
     }
     for (; i < len; ++i) {
-        a[i] += b[i];
+        a[i] = add_saturate_16bit(a[i], b[i]);
     }
 }
 void vector_normalize(int16_t* a, size_t len) {
@@ -118,11 +123,11 @@ void vector_add(int16_t* a, int16_t* b, size_t len) {
   for (; i + 7 < len; i += 8) {
     __m128i va = _mm_loadu_si128((const __m128i*)(a + i));
     __m128i vb = _mm_loadu_si128((const __m128i*)(b + i));
-    __m128i vc = _mm_add_epi16(va, vb);
+    __m128i vc = _mm_adds_epi16(va, vb);
     _mm_storeu_si128((__m128i*)(a + i), vc);
   }
   for (; i < len; ++i) {
-    a[i] += b[i];
+    a[i] = add_saturate_16bit(a[i], b[i]);
   }
 }
 void vector_normalize(int16_t* a, size_t len) {
@@ -157,7 +162,7 @@ typedef union {
 #pragma message("Building without vector math support")
 void vector_add(int16_t* a, int16_t* b, size_t len) {
     for (size_t i = 0; i < len; i++) {
-        a[i] += b[i];
+        a[i] = add_saturate_16bit(a[i], b[i]);
     }
 }
 void vector_normalize(int16_t* a, size_t len) {
