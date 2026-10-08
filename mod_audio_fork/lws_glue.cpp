@@ -191,6 +191,10 @@ namespace {
           int validAudio = (jsonAudio && NULL != jsonAudio->valuestring);
 
           const char* szAudioContentType = cJSON_GetObjectCstr(jsonData, "audioContentType");
+          if (!szAudioContentType) {
+            validAudio = 0;
+            szAudioContentType = "";
+          }
           char fileType[6];
           int sampleRate = 16000;
           if (0 == strcmp(szAudioContentType, "raw")) {
@@ -789,7 +793,7 @@ extern "C" {
         frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
         while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
           if (frame.datalen) {
-            spx_uint32_t out_len = available >> 1;  // space for samples which are 2 bytes
+            spx_uint32_t out_len = available / (sizeof(spx_int16_t) * tech_pvt->channels);  // space for frames of 2 bytes per channel
             spx_uint32_t in_len = frame.samples;
 
             speex_resampler_process_interleaved_int(tech_pvt->resampler, 
@@ -800,7 +804,7 @@ extern "C" {
 
             if (out_len > 0) {
               // bytes written = num samples * 2 * num channels
-              size_t bytes_written = out_len << tech_pvt->channels;
+              size_t bytes_written = out_len * sizeof(spx_int16_t) * tech_pvt->channels;
               pAudioPipe->binaryWritePtrAdd(bytes_written);
               available = pAudioPipe->binarySpaceAvailable();
               dirty = true;

@@ -309,11 +309,15 @@ SWITCH_STANDARD_API(fork_function)
 					sampling = atoi(argv[4]);
 				}
         if (!parse_ws_uri(channel, argv[2], &host[0], &path[0], &port, &sslFlags)) {
-          switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "invalid websocket uri: %s\n", argv[2]);
+          switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(lsession), SWITCH_LOG_ERROR, "invalid websocket uri: %s\n", argv[2]);
+          switch_core_session_rwunlock(lsession);
+          goto done;
         }
-				else if (sampling % 8000 != 0) {
-          switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "invalid sample rate: %s\n", argv[4]);					
-				}
+        if (sampling <= 0 || sampling % 8000 != 0) {
+          switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(lsession), SWITCH_LOG_ERROR, "invalid sample rate: %s\n", argv[4]);
+          switch_core_session_rwunlock(lsession);
+          goto done;
+        }
         status = start_capture(lsession, flags, host, port, path, sampling, sslFlags,
 					bidirectional_audio_enable, bidirectional_audio_stream, bidirectional_audio_sample_rate, bugname, metadata);
 			}
