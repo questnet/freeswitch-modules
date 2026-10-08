@@ -180,7 +180,7 @@ static switch_status_t send_text(switch_core_session_t *session, char* bugname, 
   return status;
 }
 
-#define FORK_API_SYNTAX "<uuid> [start | stop | send_text | pause | resume | graceful-shutdown | stop_play ] [wss-url | path] [mono | mixed | stereo] [8000 | 16000 | 24000 | 32000 | 64000] [bugname] [metadata] [bidirectionalAudio_enabled] [bidirectionalAudio_stream_enabled] [bidirectionalAudio_stream_samplerate]"
+#define FORK_API_SYNTAX "<uuid> [start | stop | send_text | pause | resume | graceful-shutdown | stop_play ] [wss-url | path] [mono | mixed | stereo] [8000 | 16000 | 24000 | 32000 | 64000] [bugname] [metadata] [bidirectionalAudio_enabled | playback] [bidirectionalAudio_stream_enabled] [bidirectionalAudio_stream_samplerate]"
 SWITCH_STANDARD_API(fork_function)
 {
 	char *mycmd = NULL, *argv[10] = { 0 };
@@ -261,6 +261,7 @@ SWITCH_STANDARD_API(fork_function)
 				int bidirectional_audio_enable = 1;
 				int bidirectional_audio_stream = 0;
 				int bidirectional_audio_sample_rate = 0;
+				int playback_only = 0;
 				// Expecting that bidirectional audio params is always received together with bugname and metadata even they are empty string
 				if (argc > 9) {
 					if (argv[5][0] != '\0') {
@@ -269,7 +270,9 @@ SWITCH_STANDARD_API(fork_function)
 					if (argv[6][0] != '\0') {
 						metadata = argv[6];
 					}
-					bidirectional_audio_enable = !strcmp(argv[7], "true") ? 1 : 0;
+					// "playback": audio from the websocket is played to the caller, caller audio is not forked
+					playback_only = !strcmp(argv[7], "playback");
+					bidirectional_audio_enable = (playback_only || !strcmp(argv[7], "true")) ? 1 : 0;
 					bidirectional_audio_stream = !strcmp(argv[8], "true") ? 1 : 0;
 					bidirectional_audio_sample_rate = atoi(argv[9]);
 
@@ -277,6 +280,7 @@ SWITCH_STANDARD_API(fork_function)
 						bidirectional_audio_stream &&
 						bidirectional_audio_sample_rate) {
 						flags |= SMBF_WRITE_REPLACE ;
+						if (playback_only) flags &= ~SMBF_READ_STREAM;
 					}
 				} else if( argc > 6 ) {
           bugname = argv[5];
