@@ -30,3 +30,8 @@
 *.exe
 *.out
 *.app
+
+# Local IDE support (just ide-setup)
+.deps/
+.clangd
+.vscode/c_cpp_properties.json

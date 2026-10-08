@@ -38,3 +38,7 @@ shell: test
 # Remove the images created by this file
 clean:
     -docker rmi {{image}} {{image}}-sse2 {{image}}-try
+
+# Fetch FreeSWITCH/libwebsockets headers into .deps and generate IDE config (see scripts/ide-setup.sh)
+ide-setup:
+    scripts/ide-setup.sh {{fs_version}} {{lws_version}}
