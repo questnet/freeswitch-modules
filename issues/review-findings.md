@@ -49,6 +49,9 @@ Status is kept up to date as items are fixed. Items not touched since the origin
 - No `realloc` failure handling for `recv_buf` growth.
 - Samples not consumed by the resampler (`in_len`) are dropped by `cBuffer->clear()`.
 - Unknown message types (including the removed `playAudio` / `transcription`) are logged at ERROR.
+- `EVENT_CONNECT_SUCCESS`, `CONNECT_FAIL`, `BUFFER_OVERRUN`, `JSON` are not reserved/freed in `mod_audio_fork_load`/`shutdown`; kriklivsky/freeswitch-modules `fix/code-review-bugfixes` does that (see `upstream-watch.md`).
+- The kriklivsky `refactor/architecture-improvements` branch (17e5fa5) fixes the two Medium receive-buffer items (first fragment allocation, oversized tail) by using a `std::vector` with an overflow flag that discards the remaining fragments; port that idea.
+- Remote `hangup` message (kriklivsky a65a94f): optional feature, not taken; see `upstream-watch.md`.
 
 ## Compatibility notes (intentional, from `/code-review`)
 
