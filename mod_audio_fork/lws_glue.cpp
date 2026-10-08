@@ -39,14 +39,22 @@ namespace {
   static unsigned int idxCallCount = 0;
   static uint32_t playCount = 0;
 
-  // private_t is a plain C struct shared with mod_audio_fork.c, so pAudioPipe points to a heap-allocated
-  // shared_ptr. The session side keeps its reference until destroy_tech_pvt; a pipe whose connection has
-  // ended is detected by its state, not by a null pointer.
-  typedef std::shared_ptr<drachtio::AudioPipe> AudioPipePtr;
+  // Session-side owner of an AudioPipe. private_t is a plain C struct shared with mod_audio_fork.c,
+  // so the reference lives behind its void* pAudioPipe. It is held until destroy_tech_pvt; a pipe whose
+  // connection has ended is detected by its state, not by a null pointer.
+  namespace PipeHandle {
+    typedef std::shared_ptr<drachtio::AudioPipe> Ptr;
 
-  drachtio::AudioPipe* getPipe(const private_t* tech_pvt) {
-    AudioPipePtr* holder = static_cast<AudioPipePtr*>(tech_pvt->pAudioPipe);
-    return holder ? holder->get() : nullptr;
+    void set(private_t* tech_pvt, Ptr pipe) { tech_pvt->pAudioPipe = new Ptr(std::move(pipe)); }
+
+    drachtio::AudioPipe* get(const private_t* tech_pvt) {
+      return tech_pvt->pAudioPipe ? static_cast<Ptr*>(tech_pvt->pAudioPipe)->get() : nullptr;
+    }
+
+    void release(private_t* tech_pvt) {
+      delete static_cast<Ptr*>(tech_pvt->pAudioPipe);
+      tech_pvt->pAudioPipe = nullptr;
+    }
   }
 
   switch_status_t processIncomingBinary(private_t* tech_pvt, switch_core_session_t* session, const char* message, size_t dataLength) {
@@ -409,7 +417,7 @@ namespace {
     
     size_t buflen = LWS_PRE + (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PACKETIZATION_PERIOD * nAudioBufferSecs);
 
-    AudioPipePtr ap = std::make_shared<drachtio::AudioPipe>(tech_pvt->sessionId, host, port, path, sslFlags, 
+    PipeHandle::Ptr ap = std::make_shared<drachtio::AudioPipe>(tech_pvt->sessionId, host, port, path, sslFlags, 
       buflen, read_impl.decoded_bytes_per_packet, username, password, bugname, bidirectional_audio_stream_enable, eventCallback);
 
     if (metadata && *metadata && !ap->enqueueText(metadata)) {
@@ -417,7 +425,7 @@ namespace {
       return SWITCH_STATUS_FALSE;
     }
 
-    tech_pvt->pAudioPipe = static_cast<void *>(new AudioPipePtr(ap));
+    PipeHandle::set(tech_pvt, ap);
 
     switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 
@@ -449,10 +457,7 @@ namespace {
 
   void destroy_tech_pvt(private_t* tech_pvt) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s (%u) destroy_tech_pvt\n", tech_pvt->sessionId, tech_pvt->id);
-    if (tech_pvt->pAudioPipe) {
-      delete static_cast<AudioPipePtr*>(tech_pvt->pAudioPipe);
-      tech_pvt->pAudioPipe = nullptr;
-    }
+    PipeHandle::release(tech_pvt);
     if (tech_pvt->resampler) {
       speex_resampler_destroy(tech_pvt->resampler);
       tech_pvt->resampler = nullptr;
@@ -630,7 +635,7 @@ extern "C" {
 
    switch_status_t fork_session_connect(void **ppUserData) {
     private_t *tech_pvt = static_cast<private_t *>(*ppUserData);
-    drachtio::AudioPipe *pAudioPipe = getPipe(tech_pvt);
+    drachtio::AudioPipe *pAudioPipe = PipeHandle::get(tech_pvt);
     if (!pAudioPipe) return SWITCH_STATUS_FALSE;
     pAudioPipe->connect();
     return SWITCH_STATUS_SUCCESS;
@@ -649,7 +654,7 @@ extern "C" {
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%u) fork_session_cleanup\n", id);
 
     if (!tech_pvt) return SWITCH_STATUS_FALSE;
-    drachtio::AudioPipe *pAudioPipe = getPipe(tech_pvt);
+    drachtio::AudioPipe *pAudioPipe = PipeHandle::get(tech_pvt);
       
     switch_mutex_lock(tech_pvt->mutex);
 
@@ -696,7 +701,7 @@ extern "C" {
     private_t* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
   
     if (!tech_pvt) return SWITCH_STATUS_FALSE;
-    drachtio::AudioPipe *pAudioPipe = getPipe(tech_pvt);
+    drachtio::AudioPipe *pAudioPipe = PipeHandle::get(tech_pvt);
     if (pAudioPipe && text && !pAudioPipe->enqueueText(text)) {
       switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "fork_session_send_text failed: text exceeds max length of %d bytes, send queue is full, or connection is closed\n", MAX_TEXT_LEN);
       return SWITCH_STATUS_FALSE;
@@ -734,7 +739,7 @@ extern "C" {
 
     tech_pvt->graceful_shutdown = 1;
 
-    drachtio::AudioPipe *pAudioPipe = getPipe(tech_pvt);
+    drachtio::AudioPipe *pAudioPipe = PipeHandle::get(tech_pvt);
     if (pAudioPipe) pAudioPipe->do_graceful_shutdown();
 
     return SWITCH_STATUS_SUCCESS;
@@ -749,12 +754,8 @@ extern "C" {
     if (!tech_pvt || tech_pvt->audio_paused || tech_pvt->graceful_shutdown) return SWITCH_TRUE;
     
     if (switch_mutex_trylock(tech_pvt->mutex) == SWITCH_STATUS_SUCCESS) {
-      if (!tech_pvt->pAudioPipe) {
-        switch_mutex_unlock(tech_pvt->mutex);
-        return SWITCH_TRUE;
-      }
-      drachtio::AudioPipe *pAudioPipe = getPipe(tech_pvt);
-      if (pAudioPipe->getLwsState() != drachtio::AudioPipe::LWS_CLIENT_CONNECTED) {
+      drachtio::AudioPipe *pAudioPipe = PipeHandle::get(tech_pvt);
+      if (!pAudioPipe || pAudioPipe->getLwsState() != drachtio::AudioPipe::LWS_CLIENT_CONNECTED) {
         switch_mutex_unlock(tech_pvt->mutex);
         return SWITCH_TRUE;
       }
