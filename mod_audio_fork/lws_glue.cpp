@@ -634,8 +634,13 @@ extern "C" {
     private_t* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
   
     if (!tech_pvt) return SWITCH_STATUS_FALSE;
+    // the pipe handle is released under this mutex by fork_session_cleanup (null afterwards)
+    switch_mutex_lock(tech_pvt->mutex);
     drachtio::AudioPipe *pAudioPipe = PipeHandle::get(tech_pvt);
-    if (pAudioPipe && text && !pAudioPipe->enqueueText(text)) {
+    bool failed = pAudioPipe && text && !pAudioPipe->enqueueText(text);
+    switch_mutex_unlock(tech_pvt->mutex);
+
+    if (failed) {
       switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "fork_session_send_text failed: text exceeds max length of %d bytes, send queue is full, or connection is closed\n", MAX_TEXT_LEN);
       return SWITCH_STATUS_FALSE;
     }
@@ -672,8 +677,11 @@ extern "C" {
 
     tech_pvt->graceful_shutdown = 1;
 
+    // the pipe handle is released under this mutex by fork_session_cleanup (null afterwards)
+    switch_mutex_lock(tech_pvt->mutex);
     drachtio::AudioPipe *pAudioPipe = PipeHandle::get(tech_pvt);
     if (pAudioPipe) pAudioPipe->do_graceful_shutdown();
+    switch_mutex_unlock(tech_pvt->mutex);
 
     return SWITCH_STATUS_SUCCESS;
   }
