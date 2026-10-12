@@ -2,8 +2,13 @@
 
 use std::ffi::{CStr, c_char};
 
-use audio_fork::fork::SUBCLASSES;
-use freeswitch::{LOG_ERROR, LOG_NOTICE, ModuleInterface, STATUS_SUCCESS, Status, Stream, sys};
+use audio_fork::{
+    api::{self, ParseError},
+    fork::SUBCLASSES,
+};
+use freeswitch::{
+    LOG_ERROR, LOG_NOTICE, ModuleInterface, STATUS_SUCCESS, Session, Status, Stream, sys,
+};
 
 const SYNTAX: &CStr = c"<uuid> [start | stop | send_text] [ws-url] [mono | mixed | stereo] [8k | 16k | <rate>] [bugname] [metadata] [true | playback] [true] [bidirectional sample rate]";
 
@@ -70,13 +75,29 @@ unsafe extern "C" fn api(
 }
 
 fn run_api(cmd: Option<&CStr>) -> String {
+    const FAILED: &str = "-ERR Operation Failed\n";
     let tokens = cmd
         .map(|c| freeswitch::separate_string(c, b' ', 10))
         .unwrap_or_default();
-    if tokens.len() < 2 {
-        return format!("-USAGE: {}\n", SYNTAX.to_string_lossy());
-    }
-    "-ERR Operation Failed\n".to_string()
+    let command = match api::parse(&tokens) {
+        Ok(command) => command,
+        Err(ParseError::Usage(reason)) => {
+            log(LOG_ERROR, &format!("uuid_audio_fork: {reason}"));
+            return format!("-USAGE: {}\n", SYNTAX.to_string_lossy());
+        }
+        Err(e @ ParseError::Unsupported(_)) => {
+            log(LOG_ERROR, &format!("uuid_audio_fork: {e}"));
+            return FAILED.to_string();
+        }
+    };
+    let Some(_session) = Session::locate(&command.session) else {
+        log(
+            LOG_ERROR,
+            &format!("uuid_audio_fork: no session {}", command.session),
+        );
+        return FAILED.to_string();
+    };
+    FAILED.to_string()
 }
 
 #[track_caller]

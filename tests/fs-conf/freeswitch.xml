@@ -59,6 +59,12 @@
   </section>
   <section name="dialplan" description="Regex/XML Dialplan">
     <context name="default">
+      <extension name="answer">
+        <condition field="destination_number" expression="^answer$">
+          <action application="answer"/>
+          <action application="park"/>
+        </condition>
+      </extension>
       <extension name="park">
         <condition field="destination_number" expression="^.*$">
           <action application="park"/>

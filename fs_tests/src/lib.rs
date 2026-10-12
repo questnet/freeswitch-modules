@@ -74,6 +74,14 @@ pub struct FreeSwitch {
     _base: TempDir,
 }
 
+impl std::fmt::Debug for FreeSwitch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FreeSwitch")
+            .field("variant", &self.variant)
+            .finish_non_exhaustive()
+    }
+}
+
 impl FreeSwitch {
     /// Starts FreeSWITCH, connects over ESL and loads the variant's module.
     pub async fn start(variant: Variant) -> Self {
@@ -162,6 +170,23 @@ impl FreeSwitch {
         resp.body().unwrap_or_default().to_string()
     }
 
+    /// Whether the module under test shows this intended difference from the Rust module.
+    pub fn shows(&self, exception: Exception) -> bool {
+        match exception {
+            Exception::SilentRejection => self.variant == Variant::C,
+        }
+    }
+
+    /// Originates a loopback pair with L16 at `rate`; leg B answers and parks, leg A parks.
+    pub async fn call(&self, rate: u32) -> Call<'_> {
+        let uuid = self.api("create_uuid").await.trim().to_string();
+        self.api_ok(&format!(
+            "originate {{origination_uuid={uuid},loopback_initial_codec=L16@{rate}h}}loopback/answer/default &park"
+        ))
+        .await;
+        Call { fs: self, a: uuid }
+    }
+
     /// Shuts FreeSWITCH down and fails if it crashed or logged a CRIT line.
     pub async fn stop(mut self) {
         // the reply may never come: the socket closes during shutdown
@@ -182,6 +207,32 @@ impl FreeSwitch {
             "freeswitch logged CRIT:\n{}",
             crits.join("\n")
         );
+    }
+}
+
+/// Behaviour of the C module that the Rust module changes on purpose (testing T4). A scenario
+/// may only accept a C-specific outcome through one of these, so a new difference fails the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exception {
+    /// Start arguments with a bad mix or rate get no reply, which ESL reports as `-ERR no reply`, instead of `-USAGE`.
+    SilentRejection,
+}
+
+#[derive(Debug)]
+pub struct Call<'a> {
+    fs: &'a FreeSwitch,
+    /// The leg the fork is attached to.
+    pub a: String,
+}
+
+impl Call<'_> {
+    /// The media bugs on leg A, as `uuid_buglist` prints them.
+    pub async fn bugs(&self) -> String {
+        self.fs.api(&format!("uuid_buglist {}", self.a)).await
+    }
+
+    pub async fn hangup(self) {
+        self.fs.api_ok(&format!("uuid_kill {}", self.a)).await;
     }
 }
 

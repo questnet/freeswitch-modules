@@ -7,3 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+tokio-tungstenite.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

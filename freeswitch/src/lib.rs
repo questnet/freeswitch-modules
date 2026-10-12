@@ -192,3 +192,32 @@ pub fn free_subclass(name: &CStr) -> bool {
             == STATUS_SUCCESS
     }
 }
+
+/// A session located by UUID, read-locked so it cannot be destroyed while this exists.
+#[derive(Debug)]
+pub struct Session(*mut sys::switch_core_session_t);
+
+impl Session {
+    pub fn locate(uuid: &str) -> Option<Session> {
+        let uuid = c_string(uuid);
+        let raw = unsafe {
+            sys::switch_core_session_perform_locate(
+                uuid.as_ptr(),
+                c"mod_audio_fork".as_ptr(),
+                c"locate".as_ptr(),
+                0,
+            )
+        };
+        (!raw.is_null()).then(|| Session(raw))
+    }
+
+    pub fn as_ptr(&self) -> *mut sys::switch_core_session_t {
+        self.0
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        unsafe { sys::switch_core_session_rwunlock(self.0) };
+    }
+}
