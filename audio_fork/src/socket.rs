@@ -182,7 +182,8 @@ fn receive(shared: &Shared, host: &dyn Host, inbound: &mut Option<Inbound>, mess
             Request::KillAudio => {
                 shared.fire(host, Event::KillAudio);
                 host.break_playback(&id.session);
-                if let Some(playout) = &shared.playout {
+                if let (Some(inbound), Some(playout)) = (inbound, &shared.playout) {
+                    inbound.prebuffer.reset();
                     playout.clear();
                 }
             }

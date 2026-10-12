@@ -5,10 +5,7 @@
 //! samples at the server's rate the first time and `320 * factor * 2` after that, where `factor`
 //! is how many server samples make one codec sample.
 
-use std::{
-    collections::VecDeque,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::collections::VecDeque;
 
 use parking_lot::Mutex;
 
@@ -35,6 +32,12 @@ impl Prebuffer {
             threshold: 320 * factor * 4,
             factor,
         }
+    }
+
+    /// Drops what is held for a killed stream, so none of it is played in front of the next one.
+    pub fn reset(&mut self) {
+        self.held.clear();
+        self.set_aside = None;
     }
 
     /// Adds a frame; returns the samples to play once enough are held, a whole multiple of `factor`
@@ -69,8 +72,6 @@ impl Prebuffer {
 #[derive(Debug, Default)]
 pub struct Playout {
     buffer: Mutex<VecDeque<i16>>,
-    /// Set by `killAudio`; the media thread discards the buffer at its next frame.
-    clear: AtomicBool,
 }
 
 impl Playout {
@@ -78,21 +79,18 @@ impl Playout {
         self.buffer.lock().extend(samples);
     }
 
+    /// Done by the task right away: audio it appends after a `killAudio` belongs to the next stream.
     pub fn clear(&self) {
-        self.clear.store(true, Ordering::Release);
+        self.buffer.lock().clear();
     }
 
     /// Mixes the next samples into an outgoing frame. Never blocks: when the task holds the buffer,
     /// the frame passes untouched and the samples wait for the next one. Returns whether the frame
-    /// was mixed (false also right after a clear, which leaves the frame as it is).
+    /// was mixed.
     pub fn mix_into(&self, frame: &mut [i16]) -> bool {
         let Some(mut buffer) = self.buffer.try_lock() else {
             return false;
         };
-        if self.clear.swap(false, Ordering::AcqRel) {
-            buffer.clear();
-            return false;
-        }
         let n = frame.len().min(buffer.len());
         for (out, sample) in frame.iter_mut().zip(buffer.drain(..n)) {
             *out = out.saturating_add(sample);
@@ -164,17 +162,5 @@ mod tests {
         assert_eq!(frame, [0, 0]);
         assert!(playout.mix_into(&mut frame));
         assert_eq!(frame, [1, 2]);
-    }
-
-    #[test]
-    fn clear_discards_what_is_buffered() {
-        let playout = Playout::default();
-        playout.append(&[1, 2]);
-        playout.clear();
-        let mut frame = [0; 2];
-        assert!(!playout.mix_into(&mut frame));
-        playout.append(&[3]);
-        assert!(playout.mix_into(&mut frame));
-        assert_eq!(frame, [3, 0]);
     }
 }

@@ -306,11 +306,59 @@ async fn playout_starts_after_the_prebuffer_and_kill_audio_discards_it() {
     conn.send_text(r#"{"type":"killAudio"}"#);
     host.wait_for(|e| *e == Event::KillAudio).await;
     let mut frame = [0; 160];
-    assert!(
-        !media.on_write_replace(&mut frame),
-        "the clear leaves the frame alone"
-    );
     media.on_write_replace(&mut frame);
     assert_eq!(frame, [0; 160], "buffered audio played after killAudio");
+    media.close();
+}
+
+/// The first sample of the first frame that carries audio.
+async fn first_played(media: &mut MediaSide) -> i16 {
+    next_played(media)
+        .await
+        .into_iter()
+        .find(|&s| s != 0)
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn audio_sent_right_after_kill_audio_is_played() {
+    let mut server = Server::start().await;
+    let (mut media, _handle, host) =
+        start_with(&server.url("/"), None, Some(8000), Timeouts::default());
+    let conn = server.accept().await;
+    host.wait_for(|e| *e == Event::Connect).await;
+    // exactly the first threshold: released whole, nothing left in the prebuffer
+    conn.send_binary(le_bytes(1..=1280));
+    assert_eq!(first_played(&mut media).await, 1);
+    // barge-in: the next utterance follows the kill at once, before the media thread's next frame
+    conn.send_text(r#"{"type":"killAudio"}"#);
+    conn.send_binary(le_bytes(20001..=22000));
+    conn.send_text(r#"{"type":"json"}"#);
+    host.wait_for(|e| matches!(e, Event::Json(_))).await;
+    assert_eq!(first_played(&mut media).await, 20001);
+    media.close();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_audio_drops_what_the_prebuffer_still_holds() {
+    let mut server = Server::start().await;
+    let (mut media, _handle, host) =
+        start_with(&server.url("/"), None, Some(8000), Timeouts::default());
+    let conn = server.accept().await;
+    host.wait_for(|e| *e == Event::Connect).await;
+    conn.send_binary(le_bytes(1..=1280));
+    // under the next threshold (640): held back
+    conn.send_binary(le_bytes(1281..=1380));
+    assert_eq!(first_played(&mut media).await, 1);
+    conn.send_text(r#"{"type":"killAudio"}"#);
+    host.wait_for(|e| *e == Event::KillAudio).await;
+    let mut frame = [0; 160];
+    media.on_write_replace(&mut frame);
+    conn.send_binary(le_bytes(20001..=21000));
+    assert_eq!(
+        first_played(&mut media).await,
+        20001,
+        "the killed stream's tail was played"
+    );
     media.close();
 }
