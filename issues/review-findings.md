@@ -39,6 +39,18 @@ Found while fixing:
 
 - [x] **Upper-case URL schemes failed to connect** (`audio_fork/src/api.rs`). The parser accepted `WS://` / `WSS://` (as the C module did), but tungstenite only connects to a lower-case scheme and fired `connect_failed` ("unsupported URL scheme"). Fixed: the parser lower-cases the scheme; unit test `schemes_are_lower_cased_for_tungstenite`.
 
+## Code review 2026-10-12 (2) (`/rust-code-review` of `fa2cb1c..aa5d6a1`)
+
+Numbers as in the review.
+
+- [ ] **1.1 A panic while firing an event stops the events of every fork** (Medium, `audio_fork/src/events.rs`). The queue's task calls `host.fire` without containing a panic, and `Session::fire_custom` asserts that the event was created. One panic ends the task; later events of all calls are lost without a log until the module is reloaded. Before the queue, the fork's own socket task panicked and `supervise` contained it (D4). Fix: contain each fire and log at CRIT.
+- [x] **1.2 A server flooding events was no longer slowed down** (Medium, `events.rs`). The socket task queued events without waiting, so a server sending messages faster than FreeSWITCH takes events grew the queue without bound. Before, FreeSWITCH blocked the task's fire once its dispatch queue was full (10000 events per dispatch thread; `switch_event.c:393`, `switch_apr_queue.c:148`, FreeSWITCH 1.11.3), and the task stopped reading the socket. Fixed: the queue holds 1024 events and the socket task waits for room; the media thread's `buffer_overrun` and panic `error` are queued by a spawned task, so they are neither dropped nor make the media thread wait.
+- [x] **1.3 Events still queued at unload are lost** (Low, `mod_audio_fork/src/lib.rs` `shutdown`). Accepted: the runtime shuts down without draining the queue; the forks being unloaded are ending anyway. Documented in the README.
+- [x] **1.4 "Queues nothing after CLOSE" has a window** (Low, `Shared::fire`). A CLOSE between the token check and the send lets one event through. Accepted: a new fork with the same bugname fires nothing before its handshake, which takes far longer. Documented at `Shared::fire`.
+- [ ] **1.5 The media thread locks `State` for every frame** (Low, `fork.rs` `on_read`). The critical sections are short and never span a call into the host, but parking_lot has no priority inheritance. Check with `just test-load` against the last numbers (1.00 % CPU per call, no overruns).
+- [ ] **2.1, 2.2 Comments**: the fix noted for 1.4 of the previous review (token cancelled under the lock) is superseded by the event queue; `docs/rust-rebuild-plan.md` still describes an outdated `MediaSide`.
+- [ ] **3.2 Absence checks without a pause** (`audio_fork/tests/simulation.rs`, `refused_connect_fires_connect_failed_once` and `stop_sends_the_final_text_before_closing`): with queued events, a wrongly queued extra event can reach the fake host only after the assertion.
+
 ## Compatibility notes (intentional, D1 and D13)
 
 Dropped compared to the C module: the subcommands `pause`, `resume`, `graceful-shutdown`, `stop_play`; the `transfer` message and event; all `MOD_AUDIO_FORK_*` environment variables; the channel variables `MOD_AUDIO_BASIC_AUTH_USERNAME`/`_PASSWORD` (basic auth) and `MOD_AUDIO_FORK_ALLOW_SELFSIGNED`, `_SKIP_SERVER_CERT_HOSTNAME_CHECK`, `_ALLOW_EXPIRED` (TLS checks are always on); `http://` and `https://` URLs. Rates must be plain integers (the C `atoi` accepted `8000x`). Malformed `start` arguments are answered with `-USAGE` where the C module sent no reply (ESL clients saw `-ERR no reply`). Within questnet only the IVR and audio-knife use the module, and neither uses any of these (checked 2026-10-12).

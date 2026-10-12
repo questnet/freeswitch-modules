@@ -84,7 +84,7 @@ A fork queues no event once it was stopped or its call hung up; one queued just 
 
 ## Failure behaviour
 
-A panic in the module ends only the fork it happened in: it is logged at CRIT, `error` fires and the bug is removed; other calls are not affected. Unloading the module removes every fork's bug and closes its connection; the calls stay up.
+A panic in the module ends only the fork it happened in: it is logged at CRIT, `error` fires and the bug is removed; other calls are not affected. Unloading the module removes every fork's bug and closes its connection; the calls stay up. Events not yet fired at that point are dropped.
 
 ## Building and testing
 
