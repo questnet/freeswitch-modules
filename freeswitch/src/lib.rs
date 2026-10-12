@@ -197,7 +197,7 @@ pub fn free_subclass(name: &CStr) -> bool {
     }
 }
 
-/// A session located by UUID, read-locked so it cannot be destroyed while this exists.
+/// A session found by UUID, read-locked until dropped, so FreeSWITCH cannot free it while it is used.
 #[derive(Debug)]
 pub struct Session(*mut sys::switch_core_session_t);
 
