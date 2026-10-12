@@ -6,7 +6,7 @@ Plan for replacing the C/C++ `mod_audio_fork` on branch `robustness-fixes` with 
 
 Steps 1–7 and 9 are done on branch `rust-rebuild`, and step 10 except deleting the C/C++ sources, `Makefile.am` and `test/` in `mod_audio_fork/` (nothing builds them any more); `just test` and `just test-fs` pass. Step 8 (fs-image) is postponed: fs-image keeps building the C module from the `fs-jambonz` commit it points to, so its submodule must not move to `rust-rebuild` before step 8 is done. Still to do by hand: the IVR conversation against audio-knife (step 5) and the `cr-901` check (step 8). Open items: [issues/review-findings.md](../issues/review-findings.md).
 
-Load (step 9, Docker Desktop, 10 CPUs, 100 calls, 60 s): FreeSWITCH used 1.03 % CPU per call with the Rust module and 1.85 % with the C module, no buffer overruns, playout delay p50 199 ms and max 219 ms for both.
+Load (step 9): no buffer overruns at 100 calls, the same playout delay as the C module, and less CPU per call, though against a C build without optimisation; numbers and caveats in [performance.md](performance.md).
 
 Where the implementation differs from this plan and [testing-plan.md](testing-plan.md):
 
