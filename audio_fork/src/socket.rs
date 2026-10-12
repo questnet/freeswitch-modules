@@ -61,14 +61,13 @@ pub(crate) async fn run(
         Ok(Err(e)) => return connect_failed(&shared, e.to_string()),
         Err(_) => return connect_failed(&shared, "connect timed out".to_string()),
     };
-    if shared.closed.is_cancelled() {
-        // closed just as the handshake completed: nothing is sent, not even the queued texts
-        tracing::debug!(session = %id.session, "{id}: closed while connecting");
+    if shared.closed.is_cancelled() || !shared.state.lock().open() {
+        // stopped or closed during the handshake: nothing is sent, not even the queued texts
+        tracing::debug!(session = %id.session, "{id}: stopped while connecting");
         shared.state.lock().phase = Phase::Ended;
         let _ = tokio::time::timeout(config.timeouts.close, socket.close(None)).await;
         return;
     }
-    shared.state.lock().open();
     tracing::info!(session = %id.session, "{id}: connected to {}", config.url);
     shared.fire(Event::Connect);
 

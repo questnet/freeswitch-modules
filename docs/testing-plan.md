@@ -68,7 +68,7 @@ A test builds a `FakeHost` that records events and `break_playback` calls, start
 - **Connect failure:** refused and timed-out connects fire one `connect_failed` whose body is valid JSON even for reasons with quotes; the media side keeps accepting frames without growing memory.
 - **Server stall:** the server stops reading; the capture ring fills after 2 s, frames are dropped, `buffer_overrun` fires exactly once.
 - **Abrupt close:** the server drops TCP; one `disconnect` event, no further sends, the media side stays usable until CLOSE.
-- **Stop:** the final text goes out before the close frame; `stop` while connecting never streams audio and closes as soon as the handshake ends.
+- **Stop:** the final text goes out before the close frame; `stop` while connecting sends nothing, fires no event and closes as soon as the handshake ends, also when CLOSE only comes later.
 - **Hangup during connect:** CLOSE before the handshake; the task cancels, the socket is closed, no event fires after CLOSE.
 - **Inbound messages:** `json` carries the whole message, `error` / `disconnect` carry `data`, unknown types and the removed `transfer` / `playAudio` fire nothing, a message over 1 MB closes the connection with `disconnect`.
 - **killAudio:** `kill_audio` fires, `break_playback` is called, playout already buffered is discarded mid-stream.

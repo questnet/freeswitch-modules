@@ -194,6 +194,20 @@ async fn stop_while_connecting_sends_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn stop_during_the_handshake_sends_nothing_before_close() {
+    let mut server = Server::start().await;
+    let (media, handle, host) = start(&server.url("/"), Some("{}"), Timeouts::default());
+    let pending = server.pending().await;
+    handle.stop(None);
+    // CLOSE only comes once the handshake is done
+    let mut conn = pending.accept().await;
+    assert_eq!(conn.next().await, Some(Frame::Close));
+    media.close();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(host.events(), vec![]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn hangup_during_connect_cancels_without_events() {
     let mut server = Server::start().await;
     // short enough that a task still waiting would fire connect_failed before the check

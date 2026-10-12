@@ -32,7 +32,7 @@ uuid_audio_fork <uuid> start <url> <mix> <rate> [bugname] [metadata] [bidi] [bid
 uuid_audio_fork <uuid> stop [bugname] [text]
 ```
 
-With one argument, it is the text if it starts with `{` or `[`, otherwise the bugname. The text is sent as the last frame before the connection is closed (only if the connection is open). Fails if there is no such fork.
+With one argument, it is the text if it starts with `{` or `[`, otherwise the bugname. The text is sent as the last frame before the connection is closed (only if the connection is open). A fork stopped while it is still connecting sends nothing, not even the metadata. Fails if there is no such fork.
 
 ### send_text
 

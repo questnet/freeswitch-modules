@@ -242,11 +242,14 @@ pub(crate) enum Phase {
 }
 
 impl State {
-    /// The handshake completed; a `stop` that came during it keeps the fork closing.
-    pub fn open(&mut self) {
+    /// The handshake completed; false when a `stop` came during it.
+    pub fn open(&mut self) -> bool {
         match self.phase {
-            Phase::Connecting => self.phase = Phase::Open,
-            Phase::Closing => {}
+            Phase::Connecting => {
+                self.phase = Phase::Open;
+                true
+            }
+            Phase::Closing => false,
             // the task is the only one to open or end a fork, and it opens it once, before ending it
             Phase::Open | Phase::Ended => unreachable!("opening a fork that is {:?}", self.phase),
         }
