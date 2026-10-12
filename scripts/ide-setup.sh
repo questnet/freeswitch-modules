@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # Fetch the FreeSWITCH headers into .deps and point cargo (and so rust-analyzer) at them through a
-# local, git-ignored .cargo/config.toml. Also keeps .clangd working for the C sources until they go.
-# Usage: scripts/ide-setup.sh <fs_version> <lws_version>
+# local, git-ignored .cargo/config.toml.
+# Usage: scripts/ide-setup.sh <fs_version>
 set -euo pipefail
-[ $# -eq 2 ] || { echo "usage: $0 <fs_version> <lws_version>" >&2; exit 1; }
+[ $# -eq 1 ] || { echo "usage: $0 <fs_version>" >&2; exit 1; }
 fs_version="$1"
-lws_version="$2"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 deps="$root/.deps"
 mkdir -p "$deps"
 [ -d "$deps/freeswitch" ] || git clone --depth 1 --branch "$fs_version" https://github.com/signalwire/freeswitch.git "$deps/freeswitch"
-[ -d "$deps/lws" ] || git clone --depth 1 --branch "$lws_version" https://github.com/warmcat/libwebsockets.git "$deps/lws"
 # Build-time headers FreeSWITCH normally generates via configure (LP64 values)
 inc="$deps/freeswitch/src/include"
 sed -e 's/@short_value@/short/' -e 's/@int_value@/int/' -e 's/@long_value@/long/' \
@@ -28,28 +26,4 @@ cat > .cargo/config.toml <<EOF
 [env]
 FREESWITCH_INCLUDE_DIR = "$inc:$teletone"
 EOF
-
-# C sources (removed in step 10 of docs/rust-rebuild-plan.md)
-if command -v cmake >/dev/null; then
-    cmake -S "$deps/lws" -B "$deps/lws/build" -DLWS_WITH_SSL=OFF -DLWS_WITHOUT_TESTAPPS=ON \
-        -DLWS_WITH_MINIMAL_EXAMPLES=OFF -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY >/dev/null
-    extra=""
-    if command -v brew >/dev/null; then
-        for f in boost speexdsp; do
-            p="$(brew --prefix "$f" 2>/dev/null || true)"
-            [ -d "$p/include" ] && extra="$extra, -I$p/include"
-        done
-    fi
-    cat > .clangd <<EOF
-CompileFlags:
-  Add: [-I$inc, -I$teletone, -I$deps/lws/include, -I$deps/lws/build, -I$root/mod_audio_fork$extra]
----
-If:
-  PathMatch: .*\.(cpp|hpp|h)
-CompileFlags:
-  Add: [-xc++, -std=c++17]
-EOF
-else
-    echo "cmake not found: skipping .clangd for the C sources"
-fi
 echo "done: restart rust-analyzer / reload the IDE window"

@@ -2,7 +2,6 @@
 
 image := "mod-audio-fork"
 fs_version := "v1.11.3"
-lws_version := "v5.0.0"
 # extra `docker build` flags, e.g. the GitHub Actions cache in CI
 build_flags := env("DOCKER_BUILD_FLAGS", "")
 
@@ -18,19 +17,16 @@ prereqs:
 test: prereqs
     docker build {{build_flags}} --target rust --tag {{image}}-rust --build-arg FS_VERSION={{fs_version}} .
 
-# Real-FreeSWITCH scenarios against the Rust and the C module, and the panic scenarios against the
-# test-hooks build; `just test-fs <filter>` runs a subset
+# Real-FreeSWITCH scenarios, and the panic scenarios against the test-hooks build; `just test-fs <filter>` runs a subset
 test-fs filter="": prereqs
-    docker build {{build_flags}} --target fs-test --tag {{image}}-fs-test --build-arg FS_VERSION={{fs_version}} --build-arg LWS_VERSION={{lws_version}} .
+    docker build {{build_flags}} --target fs-test --tag {{image}}-fs-test --build-arg FS_VERSION={{fs_version}} .
     docker run --rm -e AUDIO_FORK_MODULE=rust {{image}}-fs-test fs_tests {{filter}}
-    docker run --rm -e AUDIO_FORK_MODULE=c {{image}}-fs-test fs_tests {{filter}}
     docker run --rm -e AUDIO_FORK_MODULE=rust-hooks {{image}}-fs-test fs_tests {{filter}}
 
-# Load tier: `n` calls with bidirectional audio for 60 s, Rust and C module side by side
+# Load tier: `n` calls with bidirectional audio for 60 s
 test-load n="20": prereqs
-    docker build {{build_flags}} --target fs-test --tag {{image}}-fs-test --build-arg FS_VERSION={{fs_version}} --build-arg LWS_VERSION={{lws_version}} .
+    docker build {{build_flags}} --target fs-test --tag {{image}}-fs-test --build-arg FS_VERSION={{fs_version}} .
     docker run --rm -e AUDIO_FORK_MODULE=rust {{image}}-fs-test fs_load {{n}}
-    docker run --rm -e AUDIO_FORK_MODULE=c {{image}}-fs-test fs_load {{n}}
 
 # Rebuild from scratch, ignoring the Docker cache
 rebuild: prereqs
@@ -46,4 +42,4 @@ clean:
 
 # Fetch the FreeSWITCH headers into .deps for rust-analyzer (see scripts/ide-setup.sh)
 ide-setup:
-    scripts/ide-setup.sh {{fs_version}} {{lws_version}}
+    scripts/ide-setup.sh {{fs_version}}

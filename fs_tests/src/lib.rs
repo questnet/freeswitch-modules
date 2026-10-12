@@ -21,12 +21,11 @@ use tokio::{
     sync::Notify,
 };
 
-/// Which build of the module a run loads (differential tests, T4).
+/// Which build of the module a run loads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Variant {
     Rust,
-    C,
-    /// The Rust module built with `test-hooks`; runs only the scenarios that need them.
+    /// Built with `test-hooks`; runs only the scenarios that need them.
     RustHooks,
 }
 
@@ -34,16 +33,14 @@ impl Variant {
     pub fn from_env() -> Self {
         match env::var("AUDIO_FORK_MODULE").as_deref() {
             Ok("rust") | Err(_) => Variant::Rust,
-            Ok("c") => Variant::C,
             Ok("rust-hooks") => Variant::RustHooks,
-            Ok(other) => panic!("AUDIO_FORK_MODULE must be rust, c or rust-hooks, not {other}"),
+            Ok(other) => panic!("AUDIO_FORK_MODULE must be rust or rust-hooks, not {other}"),
         }
     }
 
     fn dir_name(self) -> &'static str {
         match self {
             Variant::Rust => "rust",
-            Variant::C => "c",
             Variant::RustHooks => "rust-hooks",
         }
     }
@@ -226,15 +223,6 @@ impl FreeSwitch {
         self.allowed_crits.lock().unwrap().push(text.to_string());
     }
 
-    /// Whether the module under test shows this intended difference from the Rust module.
-    pub fn shows(&self, exception: Exception) -> bool {
-        match exception {
-            Exception::SilentRejection | Exception::NoReceiveLimit | Exception::UncleanUnload => {
-                self.variant == Variant::C
-            }
-        }
-    }
-
     /// Originates a loopback pair with L16 at `rate`; leg B answers and parks, leg A parks.
     pub async fn call(&self, rate: u32) -> Call<'_> {
         let a = self.api("create_uuid").await.trim().to_string();
@@ -324,18 +312,6 @@ impl FreeSwitch {
             crits.join("\n")
         );
     }
-}
-
-/// Behaviour of the C module that the Rust module changes on purpose (testing T4). A scenario
-/// may only accept a C-specific outcome through one of these, so a new difference fails the run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Exception {
-    /// Start arguments with a bad mix or rate get no reply, which ESL reports as `-ERR no reply`, instead of `-USAGE`.
-    SilentRejection,
-    /// A text message over 1 MB is delivered (as one `json` event) instead of closing the connection.
-    NoReceiveLimit,
-    /// Unloading with live forks leaves their bugs and sockets behind (the scenario is skipped).
-    UncleanUnload,
 }
 
 #[derive(Debug)]

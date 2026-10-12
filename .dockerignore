@@ -2,4 +2,3 @@
 /target
 /.deps
 /.cargo
-.clangd

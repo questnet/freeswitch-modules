@@ -32,32 +32,6 @@ RUN cd /src/freeswitch && ./bootstrap.sh -j \
 RUN echo /usr/local/freeswitch/lib > /etc/ld.so.conf.d/freeswitch.conf && ldconfig
 ENV PATH=/usr/local/freeswitch/bin:$PATH
 
-# The C module, for the differential tests (T4) until its sources are deleted
-FROM fs-build AS c-module
-ARG LWS_VERSION=v5.0.0
-RUN apt-get update && apt-get install -y --no-install-recommends libboost-dev && rm -rf /var/lib/apt/lists/*
-RUN git clone --depth 1 --branch ${LWS_VERSION} https://github.com/warmcat/libwebsockets.git /src/lws \
-    && cmake -S /src/lws -B /src/lws/build \
-         -DCMAKE_BUILD_TYPE=Release -DLWS_WITH_SSL=OFF \
-         -DLWS_WITHOUT_TESTAPPS=ON -DLWS_WITHOUT_TEST_SERVER=ON \
-         -DLWS_WITHOUT_TEST_SERVER_EXTPOLL=ON -DLWS_WITHOUT_TEST_PING=ON \
-         -DLWS_WITHOUT_TEST_CLIENT=ON -DLWS_WITH_MINIMAL_EXAMPLES=OFF \
-    && cmake --build /src/lws/build -j"$(nproc)" \
-    && cmake --install /src/lws/build && ldconfig
-COPY mod_audio_fork/*.c mod_audio_fork/*.h mod_audio_fork/*.cpp mod_audio_fork/*.hpp /work/mod_audio_fork/
-COPY mod_audio_fork/test /work/mod_audio_fork/test
-WORKDIR /work/mod_audio_fork
-RUN set -eux; \
-    inc="-I/usr/local/freeswitch/include/freeswitch"; \
-    mkdir -p /tmp/obj /out/c; \
-    gcc -c -fPIC -Wall $inc mod_audio_fork.c -o /tmp/obj/mod_audio_fork.o; \
-    for f in lws_glue parser audio_pipe vector_math; do \
-      g++ -c -fPIC -Wall -std=c++17 $inc $f.cpp -o /tmp/obj/$f.o; \
-    done; \
-    g++ -shared -o /out/c/mod_audio_fork.so /tmp/obj/*.o \
-      -L/usr/local/freeswitch/lib -lfreeswitch -lwebsockets -lspeexdsp; \
-    g++ -Wall -std=c++17 -I. test/test_units.cpp vector_math.cpp -o /tmp/test_units && /tmp/test_units
-
 # fmt, clippy, unit and simulation tests, release builds (with and without test-hooks)
 FROM fs-build AS rust
 RUN apt-get update && apt-get install -y --no-install-recommends curl clang libclang-dev && rm -rf /var/lib/apt/lists/*
@@ -84,11 +58,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,targe
       cp "$exe" /out/fs_tests_$t; \
     done
 
-# FreeSWITCH, both module builds and the fs_tests binary
+# FreeSWITCH, the module with and without test-hooks, and the test binaries
 FROM fs-build AS fs-test
-COPY --from=c-module /usr/local/lib/libwebsockets.so* /usr/local/lib/
-RUN ldconfig
-COPY --from=c-module /out/c /opt/mod_audio_fork/c
 COPY --from=rust /out/rust /opt/mod_audio_fork/rust
 COPY --from=rust /out/rust-hooks /opt/mod_audio_fork/rust-hooks
 COPY --from=rust /out/fs_tests_fs /usr/local/bin/fs_tests

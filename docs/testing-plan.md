@@ -72,7 +72,7 @@ A test builds a `FakeHost` that records events and `break_playback` calls, start
 - **Hangup during connect:** CLOSE before the handshake; the task cancels, the socket is closed, no event fires after CLOSE.
 - **Inbound messages:** `json` carries the whole message, `error` / `disconnect` carry `data`, unknown types and the removed `transfer` / `playAudio` fire nothing, a message over 1 MB closes the connection with `disconnect`.
 - **killAudio:** `kill_audio` fires, `break_playback` is called, playout already buffered is discarded mid-stream.
-- **Playout:** binary is ignored without write-replace; the first release waits for the 80 ms threshold, later ones for 40 ms; a contended playout lock passes the frame through and loses no buffered audio; `playback` mode never sends binary.
+- **Playout:** binary is ignored without write-replace; the first release waits for the 160 ms threshold (`320 * factor * 4` samples), later ones for 80 ms; a contended playout lock passes the frame through and loses no buffered audio; `playback` mode never sends binary.
 - **Panic in the task:** an injected panic fires `error` and tears down that fork only; a second fork on the same runtime keeps streaming.
 
 Property tests (T8): any split of an inbound byte stream into frames yields the same sample sequence; any token list is parsed into the same `Command` the C rules would produce (expected values computed by a direct transcription of the C branch structure, kept in the test).

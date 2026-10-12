@@ -2,6 +2,23 @@
 
 Plan for replacing the C/C++ `mod_audio_fork` on branch `robustness-fixes` with a Rust implementation of the same name. Decisions were settled on 2026-10-12; the ledger below is the source of truth, the steps follow from it.
 
+## Status (2026-10-12)
+
+Steps 1–7 and 9 are done on branch `rust-rebuild`, and step 10 except deleting the C/C++ sources, `Makefile.am` and `test/` in `mod_audio_fork/` (nothing builds them any more); `just test` and `just test-fs` pass. Step 8 (fs-image) is postponed: fs-image keeps building the C module from the `fs-jambonz` commit it points to, so its submodule must not move to `rust-rebuild` before step 8 is done. Still to do by hand: the IVR conversation against audio-knife (step 5) and the `cr-901` check (step 8). Open items: [issues/review-findings.md](../issues/review-findings.md).
+
+Load (step 9, Docker Desktop, 10 CPUs, 100 calls, 60 s): FreeSWITCH used 1.03 % CPU per call with the Rust module and 1.85 % with the C module, no buffer overruns, playout delay p50 199 ms and max 219 ms for both.
+
+Where the implementation differs from this plan and [testing-plan.md](testing-plan.md):
+
+- An extra crate `test_server` holds the scripted WebSocket server (T6), shared by both test tiers. The glue has a fourth file, `log.rs`, for the `tracing` subscriber.
+- The registry maps `(uuid, bugname)` to the fork's control handle and bug pointer; no channel private data and no cancellation token. Unload removes the bugs; CLOSE ends the task.
+- The glue tokenises with FreeSWITCH's own `switch_separate_string` (so `'...'` quoting works) and hands the tokens to `api.rs`.
+- `Host` has a third method, `end`, which the task supervisor uses to remove a fork's bug after a panic.
+- CLOSE during the connect aborts the connection attempt; nothing is sent. No event fires after CLOSE: firing and CLOSE take the same lock.
+- The simulation tier pushes frames by count instead of stepping tokio's paused clock (T7): with paused time, tokio advances the clock while waiting on real socket I/O, which fires timeouts in the middle of a localhost handshake. Races are made deterministic by holding the server's handshake.
+- The differential comparison (T4) was done by running every real-FS scenario's assertions against both modules, with C-only outcomes allowed only through named exceptions, instead of recording and diffing traces. The C module behaved the same in every scenario except the exceptions listed in [review-findings.md](../issues/review-findings.md#compatibility-notes-intentional-d1-and-d13); the comparison and the C build were removed in step 10.
+- The prebuffer thresholds are 160 ms and 80 ms of audio at matching rates (the `320 * factor * 4` / `* 2` formula counts samples), as in the C module.
+
 ## Decision ledger
 
 | # | Decision | Reason | Settled by |

@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use fs_tests::{
-    Exception, FreeSwitch, Needs, Scenario,
+    FreeSwitch, Needs, Scenario,
     audio::{assert_counter, channel, frequency, samples},
 };
 use test_server::{Frame, Server, Sink};
@@ -61,14 +61,9 @@ async fn start_rejections(fs: &FreeSwitch) {
         format!("start {url} mono 72000 rej"),
         format!("start {url} mono 8k rej {{}} true true 72000 x"),
     ];
-    for (i, args) in usage.iter().enumerate() {
+    for args in &usage {
         let reply = fs.api(&format!("uuid_audio_fork {} {args}", call.a)).await;
-        // the C module answers a too short start with the usage, everything else silently
-        if i > 0 && fs.shows(Exception::SilentRejection) {
-            assert_eq!(reply, "-ERR no reply\n", "{args}");
-        } else {
-            assert!(reply.starts_with("-USAGE: "), "{args}: {reply}");
-        }
+        assert!(reply.starts_with("-USAGE: "), "{args}: {reply}");
     }
     let reply = fs
         .api(&format!(
@@ -256,11 +251,7 @@ async fn receive_limit(fs: &FreeSwitch) {
         r#"{{"type":"json","x":"{}"}}"#,
         "x".repeat(1024 * 1024)
     ));
-    if fs.shows(Exception::NoReceiveLimit) {
-        fs.event(&call.a, "big", "mod_audio_fork::json").await;
-    } else {
-        fs.event(&call.a, "big", "mod_audio_fork::disconnect").await;
-    }
+    fs.event(&call.a, "big", "mod_audio_fork::disconnect").await;
     call.fork("stop big").await;
     call.hangup().await;
 }
@@ -441,9 +432,6 @@ async fn hangup_races(fs: &FreeSwitch) {
 
 /// Unloading with live forks removes their bugs and closes their sockets; the calls survive.
 async fn unload_with_live_forks(fs: &FreeSwitch) {
-    if fs.shows(Exception::UncleanUnload) {
-        return;
-    }
     let sink = Sink::start(Duration::ZERO).await;
     let one = fs.call(8000).await;
     let two = fs.call(8000).await;
