@@ -19,7 +19,7 @@ uuid_audio_fork <uuid> start <url> <mix> <rate> [bugname] [metadata] [bidi] [bid
 - `rate`: `8k`, `16k`, or an integer that is a multiple of 8000, at most 64000. Audio is resampled from the codec rate if they differ.
 - With 6 tokens, the sixth is the metadata if it starts with `{` or `[`, otherwise the bugname. With 7 to 9 tokens, they are the bugname and the metadata.
 - With all 10 tokens, the bugname and metadata are ignored when empty (`''`), and:
-  - `bidi`: `true` plays server audio to the caller, `playback` does too but no longer sends the caller's audio, anything else neither.
+  - `bidi`: `true` plays server audio to the caller, `playback` does too but sends no call audio (only with `mono`, other mixes are rejected), anything else neither.
   - `bidi-stream`: must be `true` for playout.
   - `bidi-rate`: the rate the server sends audio at, 0 to 64000; playout needs it to be non-zero.
 - `metadata`: sent as the first text frame once connected, at most 1 MB.

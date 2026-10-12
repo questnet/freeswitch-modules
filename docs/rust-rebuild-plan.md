@@ -52,7 +52,7 @@ Arguments are split on single spaces (`switch_separate_string` semantics, at mos
   - 6 tokens: token 5 is metadata if it starts with `{` or `[`, otherwise the bugname.
   - 7–9 tokens: token 5 bugname, token 6 metadata.
   - 10 tokens: token 5 bugname and token 6 metadata (each ignored when empty), token 7 `true` / `playback` / other (bidi enable), token 8 `true` (bidi stream), token 9 bidi sample rate (0..=64000).
-  - Write-replace (playout) is attached only when enable, stream and bidi rate are all set. `playback` additionally removes the read stream: server audio is played, caller audio is not forked.
+  - Write-replace (playout) is attached only when enable, stream and bidi rate are all set. `playback` additionally removes the read stream: server audio is played, caller audio is not forked. Unlike the C module, `playback` with `mixed` or `stereo` is rejected, as it would capture only the write stream.
   - Bidi enable defaults to off for fewer than 10 tokens.
   - The channel is pre-answered first; start fails if that fails, if the read codec is missing, if a bug with that name is already attached, if the URL does not parse, or if the metadata exceeds 1 MB.
 - `<uuid> stop [bugname] [text]`: with 3 tokens, token 2 is the text if it starts with `{`/`[`, otherwise the bugname. The text is sent as the final frame before closing.

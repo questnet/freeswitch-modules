@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use audio_fork::api::{self, Action, ParseError, Start};
+use audio_fork::api::{self, Action, Mix, ParseError, Start};
 use audio_fork::fork::{
     Config, Fork, ForkHandle, ForkId, Resample, Resamplers, SUBCLASSES, Timeouts,
 };
@@ -213,15 +213,18 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
     let codec_rate = session
         .read_rate()
         .ok_or_else(|| format!("{id}: channel has no read codec"))?;
-    let channels = start.channels();
+    let capture = start.direction.capture();
+    let playout = start.direction.playout();
+    // playback attaches no read or write stream, so its capture buffer stays empty and unresampled
+    let (channels, rate) = capture.map_or((1, codec_rate), |c| (c.channels(), c.rate));
     let config = Config {
         id: id.clone(),
         url: start.url.clone(),
         channels,
         codec_rate,
-        rate: start.rate,
+        rate,
         metadata: start.metadata.clone(),
-        playout_rate: start.playout.map(|p| p.rate),
+        playout_rate: playout.map(|p| p.rate),
         timeouts: Timeouts::default(),
     };
     let resampler = |from: u32, to: u32, channels: usize| {
@@ -231,8 +234,8 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
         })
     };
     let resamplers = Resamplers {
-        capture: resampler(codec_rate, start.rate, channels),
-        playout: start.playout.and_then(|p| resampler(p.rate, codec_rate, 1)),
+        capture: resampler(codec_rate, rate, channels),
+        playout: playout.and_then(|p| resampler(p.rate, codec_rate, 1)),
     };
     let runtime = RUNTIME.lock().as_ref().unwrap().handle().clone();
     let (media, handle) = Fork::start(config, Arc::new(FsHost), resamplers, &runtime)
@@ -257,17 +260,13 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
             },
         );
     }
-    let mut flags = 0;
-    if start.reads() {
-        flags |= SMBF_READ_STREAM;
-    }
-    if start.writes() {
-        flags |= SMBF_WRITE_STREAM;
-    }
-    if channels == 2 {
-        flags |= SMBF_STEREO;
-    }
-    if start.playout.is_some() {
+    let mut flags = match capture.map(|c| c.mix) {
+        None => 0,
+        Some(Mix::Mono) => SMBF_READ_STREAM,
+        Some(Mix::Mixed) => SMBF_READ_STREAM | SMBF_WRITE_STREAM,
+        Some(Mix::Stereo) => SMBF_READ_STREAM | SMBF_WRITE_STREAM | SMBF_STEREO,
+    };
+    if playout.is_some() {
         flags |= SMBF_WRITE_REPLACE;
     }
     let data = Box::into_raw(Box::new(BugData {
@@ -289,7 +288,7 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
                 session.remove_media_bug(bug);
                 return Err(format!("{id}: the module is unloading"));
             }
-            tracing::info!(session = %uuid, "{id}: streaming {} Hz from {codec_rate} Hz to {}", start.rate, start.url);
+            tracing::info!(session = %uuid, "{id}: {:?} at codec {codec_rate} Hz, {}", start.direction, start.url);
             Ok(())
         }
         None => {

@@ -38,14 +38,28 @@ pub enum Action {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Start {
     pub url: Uri,
-    pub mix: Mix,
-    /// The rate audio is sent to the server at.
-    pub rate: u32,
     pub bugname: String,
     /// Sent as the first text frame once connected, ahead of any queued `send_text`.
     pub metadata: Option<String>,
-    /// Server audio played to the caller (write-replace); attached only when enable, stream and rate are all set.
-    pub playout: Option<Playout>,
+    pub direction: Direction,
+}
+
+/// Server audio is played to the caller (write-replace) only when bidi enable, stream and rate are all set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// The call's audio to the server only.
+    Capture(Capture),
+    /// The call's audio to the server, and server audio played to the caller.
+    Bidi(Capture, Playout),
+    /// `playback`: server audio played to the caller, nothing sent.
+    Playback(Playout),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capture {
+    pub mix: Mix,
+    /// The rate audio is sent to the server at.
+    pub rate: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,21 +76,25 @@ pub enum Mix {
 pub struct Playout {
     /// The rate the server sends audio at.
     pub rate: u32,
-    /// `playback`: the read stream is not forked, only server audio is played.
-    pub playback_only: bool,
 }
 
-impl Start {
-    /// Whether the caller's audio (the read stream) is captured.
-    pub fn reads(&self) -> bool {
-        !self.playout.is_some_and(|p| p.playback_only)
+impl Direction {
+    pub fn capture(&self) -> Option<Capture> {
+        match *self {
+            Direction::Capture(capture) | Direction::Bidi(capture, _) => Some(capture),
+            Direction::Playback(_) => None,
+        }
     }
 
-    /// Whether the audio sent to the caller (the write stream) is captured.
-    pub fn writes(&self) -> bool {
-        self.mix != Mix::Mono
+    pub fn playout(&self) -> Option<Playout> {
+        match *self {
+            Direction::Capture(_) => None,
+            Direction::Bidi(_, playout) | Direction::Playback(playout) => Some(playout),
+        }
     }
+}
 
+impl Capture {
     pub fn channels(&self) -> usize {
         if self.mix == Mix::Stereo { 2 } else { 1 }
     }
@@ -146,6 +164,7 @@ fn parse_start(args: &[String]) -> Result<Start, String> {
     let mut bugname = DEFAULT_BUGNAME.to_string();
     let mut metadata = None;
     let mut playout = None;
+    let mut playback = false;
     match rest {
         [] => {}
         [one] if looks_like_json(one) => metadata = Some(one.clone()),
@@ -159,12 +178,9 @@ fn parse_start(args: &[String]) -> Result<Start, String> {
                 metadata = Some(meta.clone());
             }
             let rate = parse_rate(bidi_rate, 0)?;
-            let playback_only = enable == "playback";
-            if (playback_only || enable == "true") && stream == "true" && rate != 0 {
-                playout = Some(Playout {
-                    rate,
-                    playback_only,
-                });
+            playback = enable == "playback";
+            if (playback || enable == "true") && stream == "true" && rate != 0 {
+                playout = Some(Playout { rate });
             }
         }
         [name, meta, ..] => {
@@ -192,13 +208,21 @@ fn parse_start(args: &[String]) -> Result<Start, String> {
             "invalid sample rate {rate}, must be a multiple of 8000"
         ));
     }
+    let capture = Capture { mix, rate };
+    let direction = match playout {
+        None => Direction::Capture(capture),
+        Some(playout) if !playback => Direction::Bidi(capture, playout),
+        // playback sends nothing, so a mix that also captures the write stream is a mistake
+        Some(_) if mix != Mix::Mono => {
+            return Err("playback captures nothing, its mix must be mono".to_string());
+        }
+        Some(playout) => Direction::Playback(playout),
+    };
     Ok(Start {
         url: parse_url(url)?,
-        mix,
-        rate,
         bugname,
         metadata,
-        playout,
+        direction,
     })
 }
 
@@ -243,7 +267,8 @@ mod tests {
     }
 
     /// The C module's branch structure, transcribed with argv indexing (plus the intended
-    /// differences: strict rates, ws/wss only), so the parser can be checked against it.
+    /// differences: strict rates, ws/wss only, playback only with mono), so the parser can be
+    /// checked against it.
     fn c_rules(argv: &[String]) -> Result<Command, ParseError> {
         let argc = argv.len();
         let usage = || Err(ParseError::Usage(String::new()));
@@ -293,10 +318,7 @@ mod tests {
                 };
                 bidi_rate = rate;
                 if enable && stream && rate != 0 {
-                    playout = Some(Playout {
-                        rate,
-                        playback_only,
-                    });
+                    playout = Some((Playout { rate }, playback_only));
                 }
             } else if argc > 6 {
                 bugname = argv[5].clone();
@@ -333,16 +355,21 @@ mod tests {
                 || rate > MAX_SAMPLE_RATE
                 || rate % 8000 != 0
                 || bidi_rate > MAX_SAMPLE_RATE
+                || (playout.is_some_and(|(_, playback_only)| playback_only) && mix != Mix::Mono)
             {
                 return usage();
             }
+            let capture = Capture { mix, rate };
+            let direction = match playout {
+                None => Direction::Capture(capture),
+                Some((playout, false)) => Direction::Bidi(capture, playout),
+                Some((playout, true)) => Direction::Playback(playout),
+            };
             Action::Start(Start {
                 url,
-                mix,
-                rate,
                 bugname,
                 metadata,
-                playout,
+                direction,
             })
         } else {
             return Err(ParseError::Unsupported(argv[1].clone()));
@@ -431,7 +458,7 @@ mod tests {
         let Action::Start(start) = cmd.action else {
             panic!()
         };
-        assert_eq!(start.playout, None);
+        assert!(matches!(start.direction, Direction::Capture(_)));
     }
 
     fn tokens(s: &[&str]) -> Vec<String> {
@@ -448,13 +475,9 @@ mod tests {
         };
         assert_eq!(start.metadata, None);
         assert_eq!(
-            start.playout,
-            Some(Playout {
-                rate: 16000,
-                playback_only: true
-            })
+            start.direction,
+            Direction::Playback(Playout { rate: 16000 })
         );
-        assert!(!start.reads());
     }
 
     #[test]
