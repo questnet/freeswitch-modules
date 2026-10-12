@@ -1,13 +1,14 @@
 //! The socket task of one fork: connect, send the metadata, queued texts and capture audio,
 //! receive, and close at CLOSE.
 
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::{Arc, OnceLock, atomic::Ordering};
 
 use futures_util::{SinkExt, StreamExt};
 use rtrb::Consumer;
+use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream,
+    Connector, MaybeTlsStream, WebSocketStream,
     tungstenite::{
         self, Message,
         client::IntoClientRequest,
@@ -108,8 +109,29 @@ async fn connect(url: &Uri) -> Result<Socket, tungstenite::Error> {
         .max_message_size(Some(MAX_TEXT_LEN))
         .max_frame_size(Some(MAX_TEXT_LEN));
     let (socket, _) =
-        tokio_tungstenite::connect_async_with_config(request, Some(config), true).await?;
+        tokio_tungstenite::connect_async_tls_with_config(request, Some(config), true, Some(tls()))
+            .await?;
     Ok(socket)
+}
+
+/// One TLS configuration for all `wss://` forks: the system's roots are read once, at the first
+/// connect, instead of from disk on a runtime thread for every one. `ws://` ignores it.
+fn tls() -> Connector {
+    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    let config = CONFIG.get_or_init(|| {
+        let native = rustls_native_certs::load_native_certs();
+        for e in &native.errors {
+            tracing::warn!("loading the system's root certificates: {e}");
+        }
+        let mut roots = RootCertStore::empty();
+        roots.add_parsable_certificates(native.certs);
+        Arc::new(
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    });
+    Connector::Rustls(config.clone())
 }
 
 fn connect_failed(shared: &Shared, host: &dyn Host, reason: String) {

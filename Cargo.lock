@@ -20,6 +20,7 @@ dependencies = [
  "proptest",
  "rtrb",
  "rustls",
+ "rustls-native-certs",
  "serde_json",
  "test_server",
  "tokio",
