@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["freeswitch", "audio_fork", "mod_audio_fork", "fs_tests"]
+# fs_tests needs a running FreeSWITCH, see docs/testing-plan.md#real-fs-tier
+default-members = ["freeswitch", "audio_fork", "mod_audio_fork"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR AGPL-3.0-only"
+publish = false
+
+[workspace.dependencies]
+freeswitch = { path = "freeswitch" }
+audio_fork = { path = "audio_fork" }
+bindgen = "0.73"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+proptest = "1.12"
+rtrb = "0.4"
+serde_json = "1"
+tokio = "1.53"
+tokio-tungstenite = "0.30"
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry"] }
+
+[profile.release]
+debug = 1

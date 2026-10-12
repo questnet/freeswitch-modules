@@ -1,1 +1,5 @@
 .git
+/target
+/.deps
+/.cargo
+.clangd

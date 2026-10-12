@@ -35,3 +35,7 @@
 .deps/
 .clangd
 .vscode/c_cpp_properties.json
+
+# Rust
+/target/
+/.cargo/config.toml

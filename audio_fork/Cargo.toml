@@ -1,0 +1,9 @@
+[package]
+name = "audio_fork"
+description = "mod_audio_fork core: argument parsing, the socket task and the media side, without FreeSWITCH"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

@@ -1,8 +1,10 @@
-# Test and build helpers for mod_audio_fork (compile-only check + unit tests, run in Docker)
+# Test and build helpers for mod_audio_fork, all run in Docker (see docs/testing-plan.md)
 
-image := "mod-audio-fork-test"
+image := "mod-audio-fork"
 fs_version := "v1.11.3"
 lws_version := "v5.0.0"
+# extra `docker build` flags, e.g. the GitHub Actions cache in CI
+build_flags := env("DOCKER_BUILD_FLAGS", "")
 
 default: test
 
@@ -12,33 +14,28 @@ prereqs:
     @docker info >/dev/null 2>&1 || { echo "docker daemon is not running"; exit 1; }
     @echo "prerequisites ok"
 
-# Compile all sources against FreeSWITCH/libwebsockets headers and run unit tests (native arch, scalar vector math)
+# fmt, clippy, unit and simulation tests, and the release build of mod_audio_fork.so
 test: prereqs
-    docker build --tag {{image}} --build-arg FS_VERSION={{fs_version}} --build-arg LWS_VERSION={{lws_version}} .
+    docker build {{build_flags}} --target rust --tag {{image}}-rust --build-arg FS_VERSION={{fs_version}} .
 
-# Same, on linux/amd64 with SSE2 vector math (emulated on arm hosts)
-test-sse2: prereqs
-    docker build --platform linux/amd64 --tag {{image}}-sse2 --build-arg SIMD=sse2 --build-arg FS_VERSION={{fs_version}} --build-arg LWS_VERSION={{lws_version}} .
-
-# Run both configurations
-test-all: test test-sse2
+# Real-FreeSWITCH scenarios against the Rust and the C module; `just test-fs <filter>` runs a subset
+test-fs filter="": prereqs
+    docker build {{build_flags}} --target fs-test --tag {{image}}-fs-test --build-arg FS_VERSION={{fs_version}} --build-arg LWS_VERSION={{lws_version}} .
+    docker run --rm -e AUDIO_FORK_MODULE=rust {{image}}-fs-test fs_tests {{filter}}
+    docker run --rm -e AUDIO_FORK_MODULE=c {{image}}-fs-test fs_tests {{filter}}
 
 # Rebuild from scratch, ignoring the Docker cache
 rebuild: prereqs
-    docker build --no-cache --tag {{image}} .
+    docker build --no-cache --target fs-test --tag {{image}}-fs-test .
 
-# Try other versions, e.g. `just try-versions v1.11.3 v5.0.0`
-try-versions fs lws: prereqs
-    docker build --tag {{image}}-try --build-arg FS_VERSION={{fs}} --build-arg LWS_VERSION={{lws}} .
-
-# Interactive shell in the built image for debugging
-shell: test
-    docker run --rm -it {{image}} bash
+# Interactive shell in the fs-test image for debugging
+shell:
+    docker run --rm -it {{image}}-fs-test bash
 
 # Remove the images created by this file
 clean:
-    -docker rmi {{image}} {{image}}-sse2 {{image}}-try
+    -docker rmi {{image}}-rust {{image}}-fs-test
 
-# Fetch FreeSWITCH/libwebsockets headers into .deps and generate IDE config (see scripts/ide-setup.sh)
+# Fetch the FreeSWITCH headers into .deps for rust-analyzer (see scripts/ide-setup.sh)
 ide-setup:
     scripts/ide-setup.sh {{fs_version}} {{lws_version}}
