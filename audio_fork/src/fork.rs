@@ -18,9 +18,9 @@ use rtrb::{Producer, RingBuffer};
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_util::sync::CancellationToken;
 
+use crate::api::WsUrl;
 use crate::playout::{Playout, Prebuffer};
 use crate::socket;
 
@@ -113,7 +113,7 @@ pub trait Resample: Send {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub id: ForkId,
-    pub url: Uri,
+    pub url: WsUrl,
     pub channels: usize,
     /// The rate frames arrive at from the media thread.
     pub codec_rate: u32,

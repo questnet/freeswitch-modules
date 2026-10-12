@@ -4,6 +4,7 @@
 //! Rates are plain integers and only `ws://` / `wss://` URLs are accepted: no caller sends anything else.
 
 use std::fmt;
+use std::str::FromStr;
 
 use tokio_tungstenite::tungstenite::http::Uri;
 
@@ -37,7 +38,7 @@ pub enum Action {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Start {
-    pub url: Uri,
+    pub url: WsUrl,
     pub bugname: String,
     /// Sent as the first text frame once connected, ahead of any queued `send_text`.
     pub metadata: Option<String>,
@@ -97,6 +98,50 @@ impl Direction {
 impl Capture {
     pub fn channels(&self) -> usize {
         if self.mix == Mix::Stereo { 2 } else { 1 }
+    }
+}
+
+/// A `ws://` or `wss://` URL with a host; only built by parsing, so the scheme is checked once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WsUrl {
+    uri: Uri,
+    tls: bool,
+}
+
+impl WsUrl {
+    pub fn uri(&self) -> &Uri {
+        &self.uri
+    }
+
+    /// `wss://`.
+    pub fn tls(&self) -> bool {
+        self.tls
+    }
+}
+
+impl FromStr for WsUrl {
+    type Err = String;
+
+    fn from_str(token: &str) -> Result<Self, String> {
+        let invalid = || format!("invalid websocket url {token}");
+        let uri: Uri = token.parse().map_err(|_| invalid())?;
+        let scheme = uri.scheme_str().unwrap_or_default().to_ascii_lowercase();
+        if !matches!(scheme.as_str(), "ws" | "wss") || uri.host().is_none_or(str::is_empty) {
+            return Err(invalid());
+        }
+        // tungstenite only connects to a lower-case scheme; `WS://` was accepted by the C module
+        let mut parts = uri.into_parts();
+        parts.scheme = Some(scheme.parse().unwrap());
+        Ok(WsUrl {
+            uri: Uri::from_parts(parts).unwrap(),
+            tls: scheme == "wss",
+        })
+    }
+}
+
+impl fmt::Display for WsUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.uri.fmt(f)
     }
 }
 
@@ -219,7 +264,7 @@ fn parse_start(args: &[String]) -> Result<Start, String> {
         Some(playout) => Direction::Playback(playout),
     };
     Ok(Start {
-        url: parse_url(url)?,
+        url: url.parse()?,
         bugname,
         metadata,
         direction,
@@ -232,19 +277,6 @@ fn parse_rate(token: &str, min: u32) -> Result<u32, String> {
         .ok()
         .filter(|r| (min..=MAX_SAMPLE_RATE).contains(r))
         .ok_or_else(|| format!("invalid sample rate {token}, must be {min}..={MAX_SAMPLE_RATE}"))
-}
-
-fn parse_url(token: &str) -> Result<Uri, String> {
-    let invalid = || format!("invalid websocket url {token}");
-    let uri: Uri = token.parse().map_err(|_| invalid())?;
-    let scheme = uri.scheme_str().unwrap_or_default().to_ascii_lowercase();
-    if !matches!(scheme.as_str(), "ws" | "wss") || uri.host().is_none_or(str::is_empty) {
-        return Err(invalid());
-    }
-    // tungstenite only connects to a lower-case scheme; `WS://` was accepted by the C module
-    let mut parts = uri.into_parts();
-    parts.scheme = Some(scheme.parse().unwrap());
-    Ok(Uri::from_parts(parts).unwrap())
 }
 
 #[cfg(test)]
@@ -366,7 +398,8 @@ mod tests {
                 Some((playout, true)) => Direction::Playback(playout),
             };
             Action::Start(Start {
-                url,
+                // the parser must accept every URL the rules above accept
+                url: argv[2].parse().unwrap(),
                 bugname,
                 metadata,
                 direction,
@@ -486,7 +519,7 @@ mod tests {
         let Action::Start(start) = parse(&argv).unwrap().action else {
             panic!()
         };
-        assert_eq!(start.url.scheme_str(), Some("wss"));
+        assert_eq!(start.url.uri().scheme_str(), Some("wss"));
     }
 
     #[test]

@@ -9,11 +9,12 @@ use rtrb::Consumer;
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::{HeaderValue, Uri};
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
+use crate::api::WsUrl;
 use crate::fork::{Config, Event, Host, MAX_TEXT_LEN, Phase, Resample, Shared};
 use crate::playout::Prebuffer;
 
@@ -94,8 +95,8 @@ pub(crate) async fn run(
     }
 }
 
-async fn connect(url: &Uri) -> Result<Socket, tungstenite::Error> {
-    let mut request = url.clone().into_client_request()?;
+async fn connect(url: &WsUrl) -> Result<Socket, tungstenite::Error> {
+    let mut request = url.uri().clone().into_client_request()?;
     request.headers_mut().insert(
         "Sec-WebSocket-Protocol",
         HeaderValue::from_static(SUBPROTOCOL),
@@ -104,10 +105,7 @@ async fn connect(url: &Uri) -> Result<Socket, tungstenite::Error> {
         .max_message_size(Some(MAX_TEXT_LEN))
         .max_frame_size(Some(MAX_TEXT_LEN));
     // the roots are only read for the first wss:// fork, never for ws://
-    let tls = url
-        .scheme_str()
-        .is_some_and(|s| s.eq_ignore_ascii_case("wss"))
-        .then(tls);
+    let tls = url.tls().then(tls);
     let (socket, _) =
         tokio_tungstenite::connect_async_tls_with_config(request, Some(config), true, tls).await?;
     Ok(socket)
