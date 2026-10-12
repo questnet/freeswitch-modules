@@ -1,6 +1,7 @@
 //! The socket task of one fork: connect, send the metadata, queued texts and capture audio,
 //! receive, and close at CLOSE.
 
+#[cfg(feature = "test-hooks")]
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
@@ -67,13 +68,11 @@ pub(crate) async fn run(
         let _ = tokio::time::timeout(config.timeouts.close, socket.close(None)).await;
         return;
     }
-    shared.state.lock().phase = Phase::Open;
-    shared.streaming.store(true, Ordering::Release);
+    shared.state.lock().open();
     tracing::info!(session = %id.session, "{id}: connected to {}", config.url);
     shared.fire(Event::Connect);
 
     let end = stream(&mut socket, &shared, &*host, &mut capture, &mut inbound).await;
-    shared.streaming.store(false, Ordering::Release);
     match end {
         End::Closed => {
             let flushed =

@@ -10,6 +10,7 @@ use std::collections::VecDeque;
 use std::ffi::CStr;
 use std::fmt;
 use std::sync::Arc;
+#[cfg(feature = "test-hooks")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -184,8 +185,6 @@ pub(crate) struct Shared {
     pub state: Mutex<State>,
     /// Wakes the task: a frame was pushed, a text queued, or the fork is closing.
     pub wake: Notify,
-    /// Set by the task while frames can be sent; the media side drops frames otherwise, as there is nobody to send them to.
-    pub streaming: AtomicBool,
     /// Cancelled at CLOSE; the task then flushes texts, sends the close frame and ends, and no event is queued any more.
     pub closed: CancellationToken,
     events: EventQueue,
@@ -221,25 +220,44 @@ pub enum PanicIn {
     Task,
 }
 
-/// The fork's lifecycle and the texts waiting to be sent, under one lock: whether a text is accepted depends on the phase.
+/// The fork's lifecycle and the texts waiting to be sent, under one lock: whether a text is accepted
+/// depends on the phase. Held only briefly and never across a call into the host, so the media
+/// thread can take it for every frame.
 #[derive(Debug, Default)]
 pub(crate) struct State {
     pub phase: Phase,
     pub texts: VecDeque<String>,
     pub bytes: usize,
-    /// No more texts are accepted: `stop` was called or CLOSE ran.
-    pub closing: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
     #[default]
     Connecting,
+    /// Captured audio is buffered only now: before, nothing could send it, and after, nothing will.
     Open,
+    /// `stop` was called or CLOSE ran: no more texts are accepted, the task flushes what is queued.
+    Closing,
     Ended,
 }
 
 impl State {
+    /// The handshake completed; a `stop` that came during it keeps the fork closing.
+    pub fn open(&mut self) {
+        match self.phase {
+            Phase::Connecting => self.phase = Phase::Open,
+            Phase::Closing => {}
+            // the task is the only one to open or end a fork, and it opens it once, before ending it
+            Phase::Open | Phase::Ended => unreachable!("opening a fork that is {:?}", self.phase),
+        }
+    }
+
+    fn close(&mut self) {
+        if self.phase != Phase::Ended {
+            self.phase = Phase::Closing;
+        }
+    }
+
     fn push(&mut self, text: String) -> Result<(), TextError> {
         if text.len() > MAX_TEXT_LEN {
             return Err(TextError::TooLong);
@@ -281,7 +299,6 @@ impl Fork {
             id: config.id.clone(),
             state: Mutex::new(state),
             wake: Notify::new(),
-            streaming: AtomicBool::new(false),
             closed: CancellationToken::new(),
             events: events.clone(),
             playout: config.playout_rate.map(|_| Playout::default()),
@@ -371,7 +388,7 @@ impl MediaSide {
         if self.shared.inject.media.swap(false, Ordering::AcqRel) {
             panic!("injected in the media callback");
         }
-        if !self.shared.streaming.load(Ordering::Acquire) {
+        if self.shared.state.lock().phase != Phase::Open {
             return;
         }
         let samples = match &mut self.resampler {
@@ -425,7 +442,7 @@ impl MediaSide {
 // a media side dropped any other way (a start that lost a race, a panic in CLOSE) must not leave its task running
 impl Drop for MediaSide {
     fn drop(&mut self) {
-        self.shared.state.lock().closing = true;
+        self.shared.state.lock().close();
         self.shared.closed.cancel();
     }
 }
@@ -450,7 +467,7 @@ impl ForkHandle {
     /// Queues one text frame; texts sent before the connection is open go out right after the metadata.
     pub fn send_text(&self, text: String) -> Result<(), TextError> {
         let mut state = self.shared.state.lock();
-        if state.closing || state.phase == Phase::Ended {
+        if matches!(state.phase, Phase::Closing | Phase::Ended) {
             return Err(TextError::NotOpen);
         }
         state.push(text)?;
@@ -463,13 +480,13 @@ impl ForkHandle {
     /// The fork ends when the host removes the bug (CLOSE).
     pub fn stop(&self, text: Option<String>) {
         let mut state = self.shared.state.lock();
-        if let Some(text) = text.filter(|_| state.phase == Phase::Open && !state.closing) {
+        if let Some(text) = text.filter(|_| state.phase == Phase::Open) {
             // the connection closes right after; a final text over the limits is dropped like one sent too late
             if let Err(e) = state.push(text) {
                 tracing::warn!(session = %self.shared.id.session, "{}: final text not sent: {e}", self.shared.id);
             }
         }
-        state.closing = true;
+        state.close();
         drop(state);
         self.shared.wake.notify_one();
     }
