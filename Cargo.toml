@@ -14,6 +14,7 @@ freeswitch = { path = "freeswitch" }
 audio_fork = { path = "audio_fork" }
 test_server = { path = "test_server" }
 bindgen = "0.73"
+parking_lot = "0.12"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 proptest = "1.12"
 rtrb = "0.4"

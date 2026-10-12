@@ -10,6 +10,8 @@ publish.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
+# no lock poisoning: a contained panic must not disable every other fork (D4)
+parking_lot.workspace = true
 audio_fork.workspace = true
 freeswitch.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     ffi::{CStr, c_char, c_void},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -23,6 +23,7 @@ use freeswitch::{
     MediaBug, ModuleInterface, SMBF_READ_STREAM, SMBF_STEREO, SMBF_WRITE_REPLACE,
     SMBF_WRITE_STREAM, STATUS_SUCCESS, Session, Status, Stream, sys,
 };
+use parking_lot::Mutex;
 use tokio::runtime::Runtime;
 
 use crate::{
@@ -81,8 +82,8 @@ unsafe extern "C" fn load(
             .enable_all()
             .build()
             .expect("building the tokio runtime");
-        *RUNTIME.lock().unwrap() = Some(runtime);
-        *FORKS.lock().unwrap() = Some(HashMap::new());
+        *RUNTIME.lock() = Some(runtime);
+        *FORKS.lock() = Some(HashMap::new());
         interface.add_api(c"uuid_audio_fork", c"audio_fork API", SYNTAX, api);
         tracing::info!("mod_audio_fork loaded");
         STATUS_SUCCESS
@@ -94,7 +95,6 @@ unsafe extern "C" fn shutdown() -> Status {
         // FreeSWITCH must not call into this library once it is unmapped, so every bug goes first
         let bugs: Vec<(ForkId, Option<MediaBug>)> = FORKS
             .lock()
-            .unwrap()
             .as_ref()
             .unwrap()
             .iter()
@@ -105,8 +105,8 @@ unsafe extern "C" fn shutdown() -> Status {
                 session.remove_media_bug(bug);
             }
         }
-        *FORKS.lock().unwrap() = None;
-        if let Some(runtime) = RUNTIME.lock().unwrap().take() {
+        *FORKS.lock() = None;
+        if let Some(runtime) = RUNTIME.lock().take() {
             runtime.shutdown_timeout(Duration::from_secs(5));
         }
         for name in SUBCLASSES {
@@ -178,7 +178,7 @@ fn fork_id(session: &str, bugname: String) -> ForkId {
 
 fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String> {
     let id = fork_id(uuid, start.bugname.clone());
-    if FORKS.lock().unwrap().as_ref().unwrap().contains_key(&id) {
+    if FORKS.lock().as_ref().unwrap().contains_key(&id) {
         return Err(format!("{id}: bug already attached"));
     }
     if !session.pre_answer() {
@@ -208,14 +208,14 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
         capture: resampler(codec_rate, start.rate, channels),
         playout: start.playout.and_then(|p| resampler(p.rate, codec_rate, 1)),
     };
-    let runtime = RUNTIME.lock().unwrap().as_ref().unwrap().handle().clone();
+    let runtime = RUNTIME.lock().as_ref().unwrap().handle().clone();
     let (media, handle) = Fork::start(config, Arc::new(FsHost), resamplers, &runtime)
         .map_err(|e| format!("{id}: metadata: {e}"))?;
 
     let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
     {
         // registered before the bug exists, so a CLOSE right after attaching finds the entry to remove
-        let mut forks = FORKS.lock().unwrap();
+        let mut forks = FORKS.lock();
         let forks = forks.as_mut().unwrap();
         if forks.contains_key(&id) {
             return Err(format!("{id}: bug already attached"));
@@ -251,7 +251,6 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
         Some(bug) => {
             if let Some(entry) = FORKS
                 .lock()
-                .unwrap()
                 .as_mut()
                 .unwrap()
                 .get_mut(&id)
@@ -273,7 +272,7 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
 
 fn stop_fork(session: &Session, id: ForkId, text: Option<String>) -> Result<(), String> {
     let (handle, bug) = {
-        let forks = FORKS.lock().unwrap();
+        let forks = FORKS.lock();
         let entry = forks
             .as_ref()
             .unwrap()
@@ -291,13 +290,7 @@ fn stop_fork(session: &Session, id: ForkId, text: Option<String>) -> Result<(), 
 
 /// The bug of a registered fork, once it is attached.
 fn bug_of(id: &ForkId) -> Option<MediaBug> {
-    FORKS
-        .lock()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .get(id)
-        .and_then(|e| e.bug)
+    FORKS.lock().as_ref().unwrap().get(id).and_then(|e| e.bug)
 }
 
 /// `<uuid> test_panic_media|test_panic_task <bugname>` (T9), only in test builds.
@@ -315,7 +308,6 @@ fn test_hook(tokens: &[String]) -> Option<String> {
     let id = fork_id(session, bugname.clone());
     let handle = FORKS
         .lock()
-        .unwrap()
         .as_ref()
         .unwrap()
         .get(&id)
@@ -331,7 +323,7 @@ fn test_hook(tokens: &[String]) -> Option<String> {
 
 fn send_text(id: ForkId, text: Option<String>) -> Result<(), String> {
     let handle = {
-        let forks = FORKS.lock().unwrap();
+        let forks = FORKS.lock();
         forks
             .as_ref()
             .unwrap()
@@ -350,7 +342,7 @@ fn send_text(id: ForkId, text: Option<String>) -> Result<(), String> {
 
 /// The fork's CLOSE: drops its registry entry unless a newer fork took the id meanwhile.
 fn closed(id: &ForkId, serial: u64) {
-    let mut forks = FORKS.lock().unwrap();
+    let mut forks = FORKS.lock();
     // unload removes every bug before it drops the registry
     let forks = forks.as_mut().expect("CLOSE after unload");
     if forks.get(id).is_some_and(|e| e.serial == serial) {

@@ -7,11 +7,10 @@
 
 use std::{
     collections::VecDeque,
-    sync::{
-        Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::atomic::{AtomicBool, Ordering},
 };
+
+use parking_lot::Mutex;
 
 /// Inbound L16 bytes collected until there is enough to release.
 #[derive(Debug)]
@@ -76,7 +75,7 @@ pub struct Playout {
 
 impl Playout {
     pub fn append(&self, samples: &[i16]) {
-        self.buffer.lock().unwrap().extend(samples);
+        self.buffer.lock().extend(samples);
     }
 
     pub fn clear(&self) {
@@ -87,7 +86,7 @@ impl Playout {
     /// the frame passes untouched and the samples wait for the next one. Returns whether the frame
     /// was mixed (false also right after a clear, which leaves the frame as it is).
     pub fn mix_into(&self, frame: &mut [i16]) -> bool {
-        let Ok(mut buffer) = self.buffer.try_lock() else {
+        let Some(mut buffer) = self.buffer.try_lock() else {
             return false;
         };
         if self.clear.swap(false, Ordering::AcqRel) {
@@ -159,7 +158,7 @@ mod tests {
         playout.append(&[1, 2]);
         let mut frame = [0; 2];
         {
-            let _task = playout.buffer.lock().unwrap();
+            let _task = playout.buffer.lock();
             assert!(!playout.mix_into(&mut frame));
         }
         assert_eq!(frame, [0, 0]);

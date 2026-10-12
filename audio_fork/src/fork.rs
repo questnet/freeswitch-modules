@@ -11,12 +11,13 @@ use std::{
     ffi::CStr,
     fmt,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
+use parking_lot::Mutex;
 use rtrb::{Producer, RingBuffer};
 use tokio::{runtime::Handle, sync::Notify, task::JoinHandle};
 use tokio_tungstenite::tungstenite::http::Uri;
@@ -201,7 +202,7 @@ pub(crate) struct Shared {
 impl Shared {
     /// Fires unless CLOSE ran. Under the outbox lock, which CLOSE takes too, so no event can follow it.
     pub fn fire(&self, host: &dyn Host, event: Event) {
-        let outbox = self.outbox.lock().unwrap();
+        let outbox = self.outbox.lock();
         if !outbox.closed {
             host.fire(&self.id, event);
         }
@@ -209,7 +210,7 @@ impl Shared {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.outbox.lock().unwrap().closed
+        self.outbox.lock().closed
     }
 }
 
@@ -430,7 +431,7 @@ impl MediaSide {
 
     /// The bug's CLOSE: the task sends what is queued, closes the socket and ends.
     pub fn close(self) {
-        let mut outbox = self.shared.outbox.lock().unwrap();
+        let mut outbox = self.shared.outbox.lock();
         outbox.closing = true;
         outbox.closed = true;
         drop(outbox);
@@ -457,7 +458,7 @@ impl ForkHandle {
 
     /// Queues one text frame; texts sent before the connection is open go out right after the metadata.
     pub fn send_text(&self, text: String) -> Result<(), TextError> {
-        let mut outbox = self.shared.outbox.lock().unwrap();
+        let mut outbox = self.shared.outbox.lock();
         if outbox.closing || outbox.phase == Phase::Ended {
             return Err(TextError::NotOpen);
         }
@@ -470,7 +471,7 @@ impl ForkHandle {
     /// Accepts no more texts; `text` is the last frame before the close, if the connection is open.
     /// The fork ends when the host removes the bug (CLOSE).
     pub fn stop(&self, text: Option<String>) {
-        let mut outbox = self.shared.outbox.lock().unwrap();
+        let mut outbox = self.shared.outbox.lock();
         if let Some(text) = text.filter(|_| outbox.phase == Phase::Open && !outbox.closing) {
             // the connection closes right after; a final text over the limits is dropped like one sent too late
             if let Err(e) = outbox.push(text) {
