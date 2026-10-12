@@ -365,6 +365,7 @@ fn send_text(id: ForkId, text: Option<String>) -> Result<(), String> {
         Some(text) => handle
             .send_text(text)
             .map_err(|e| format!("{id}: send_text: {e}")),
+        // without a text, `send_text` only checks that the fork exists, which the lookup above did
         None => Ok(()),
     }
 }

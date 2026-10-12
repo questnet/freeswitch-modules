@@ -20,14 +20,17 @@ pub struct Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Start(Start),
-    /// `text` is sent as the final frame before closing.
     Stop {
         bugname: String,
+        /// Sent as the final frame before closing; `None` without arguments or when the only one does
+        /// not look like JSON, which the C module took as the bugname.
         text: Option<String>,
     },
     /// Without a text it only checks that the fork exists, as the C module did.
     SendText {
         bugname: String,
+        /// `None` when the only argument does not look like JSON, which the C module took as the bugname;
+        /// the command then only checks that the fork exists.
         text: Option<String>,
     },
 }
@@ -39,6 +42,7 @@ pub struct Start {
     /// The rate audio is sent to the server at.
     pub rate: u32,
     pub bugname: String,
+    /// Sent as the first text frame once connected, ahead of any queued `send_text`.
     pub metadata: Option<String>,
     /// Server audio played to the caller (write-replace); attached only when enable, stream and rate are all set.
     pub playout: Option<Playout>,
