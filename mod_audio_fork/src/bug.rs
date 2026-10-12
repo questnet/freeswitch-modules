@@ -4,6 +4,7 @@ use std::ffi::c_void;
 
 use audio_fork::fork::{ForkId, MediaSide};
 use freeswitch::{ABC_CLOSE, ABC_READ, ABC_WRITE_REPLACE, FALSE, MediaBug, TRUE, sys};
+use tracing::info;
 
 /// The bug's user data, from `start` until CLOSE.
 #[derive(Debug)]
@@ -46,7 +47,7 @@ pub unsafe extern "C" fn callback(
             // the fork stops queueing events before a new fork with this bugname can start
             media.close();
             crate::closed(&id, serial);
-            tracing::info!(session = %id.session, "{id}: bug closed");
+            info!(session = %id.session, "{id}: bug closed");
             TRUE
         }
         _ => TRUE,

@@ -20,6 +20,7 @@ use tokio::runtime::Handle;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::{error, warn};
 
 use crate::api::{Capture, WsUrl};
 use crate::events::EventQueue;
@@ -345,7 +346,7 @@ async fn supervise(task: JoinHandle<()>, shared: Arc<Shared>, host: Arc<dyn Host
     }
     let message = panic_message(e.into_panic());
     let id = &shared.id;
-    tracing::error!(target: "crit", session = %id.session, "{id}: socket task panicked: {message}");
+    error!(target: "crit", session = %id.session, "{id}: socket task panicked: {message}");
     shared.fire(panic_event(&message));
     if !shared.closed.is_cancelled() {
         host.end(id);
@@ -417,7 +418,7 @@ impl MediaSide {
             return;
         }
         self.overrun_notified = true;
-        tracing::error!(session = %self.shared.id.session, "{}: capture buffer full, dropping frames", self.shared.id);
+        error!(session = %self.shared.id.session, "{}: capture buffer full, dropping frames", self.shared.id);
         self.shared.fire(Event::BufferOverrun);
     }
 
@@ -486,7 +487,7 @@ impl ForkHandle {
         if let Some(text) = text.filter(|_| state.phase == Phase::Open) {
             // the connection closes right after; a final text over the limits is dropped like one sent too late
             if let Err(e) = state.push(text) {
-                tracing::warn!(session = %self.shared.id.session, "{}: final text not sent: {e}", self.shared.id);
+                warn!(session = %self.shared.id.session, "{}: final text not sent: {e}", self.shared.id);
             }
         }
         state.close();

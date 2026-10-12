@@ -14,6 +14,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
+use tracing::{debug, info, warn};
 
 use crate::api::WsUrl;
 use crate::fork::{Config, Event, Host, MAX_TEXT_LEN, Phase, Resample, Shared};
@@ -50,7 +51,7 @@ pub(crate) async fn run(
         biased;
         _ = shared.closed.cancelled() => {
             // hung up or stopped while connecting: the connection attempt is dropped, nothing is sent
-            tracing::debug!(session = %id.session, "{id}: closed while connecting");
+            debug!(session = %id.session, "{id}: closed while connecting");
             shared.state.lock().phase = Phase::Ended;
             return;
         }
@@ -63,12 +64,12 @@ pub(crate) async fn run(
     };
     if shared.closed.is_cancelled() || !shared.state.lock().open() {
         // stopped or closed during the handshake: nothing is sent, not even the queued texts
-        tracing::debug!(session = %id.session, "{id}: stopped while connecting");
+        debug!(session = %id.session, "{id}: stopped while connecting");
         shared.state.lock().phase = Phase::Ended;
         let _ = tokio::time::timeout(config.timeouts.close, socket.close(None)).await;
         return;
     }
-    tracing::info!(session = %id.session, "{id}: connected to {}", config.url);
+    info!(session = %id.session, "{id}: connected to {}", config.url);
     shared.fire(Event::Connect);
 
     let end = stream(&mut socket, &shared, &*host, &mut capture, &mut inbound).await;
@@ -78,16 +79,16 @@ pub(crate) async fn run(
                 tokio::time::timeout(config.timeouts.close, close(&mut socket, &shared)).await;
             shared.state.lock().phase = Phase::Ended;
             match flushed {
-                Ok(Ok(())) => tracing::debug!(session = %id.session, "{id}: closed"),
+                Ok(Ok(())) => debug!(session = %id.session, "{id}: closed"),
                 Ok(Err(e)) => {
-                    tracing::info!(session = %id.session, "{id}: error while closing: {e}")
+                    info!(session = %id.session, "{id}: error while closing: {e}")
                 }
-                Err(_) => tracing::info!(session = %id.session, "{id}: close timed out"),
+                Err(_) => info!(session = %id.session, "{id}: close timed out"),
             }
         }
         End::Dropped(reason) => {
             shared.state.lock().phase = Phase::Ended;
-            tracing::info!(session = %id.session, "{id}: connection dropped: {reason}");
+            info!(session = %id.session, "{id}: connection dropped: {reason}");
             shared.fire(Event::Disconnect(None));
         }
     }
@@ -116,7 +117,7 @@ fn tls() -> Connector {
     let config = CONFIG.get_or_init(|| {
         let native = rustls_native_certs::load_native_certs();
         for e in &native.errors {
-            tracing::warn!("loading the system's root certificates: {e}");
+            warn!("loading the system's root certificates: {e}");
         }
         let mut roots = RootCertStore::empty();
         roots.add_parsable_certificates(native.certs);
@@ -132,7 +133,7 @@ fn tls() -> Connector {
 fn connect_failed(shared: &Shared, reason: String) {
     let id = &shared.id;
     shared.state.lock().phase = Phase::Ended;
-    tracing::info!(session = %id.session, "{id}: connection failed: {reason}");
+    info!(session = %id.session, "{id}: connection failed: {reason}");
     shared.fire(Event::ConnectFailed { reason });
 }
 
@@ -207,7 +208,7 @@ fn receive(shared: &Shared, host: &dyn Host, inbound: &mut Option<Inbound>, mess
                 }
             }
             Request::Ignored(why) => {
-                tracing::info!(session = %id.session, "{id}: ignoring message: {why}")
+                info!(session = %id.session, "{id}: ignoring message: {why}")
             }
         },
         Message::Binary(bytes) => match (inbound, &shared.playout) {
@@ -224,7 +225,7 @@ fn receive(shared: &Shared, host: &dyn Host, inbound: &mut Option<Inbound>, mess
                 }
             }
             _ => {
-                tracing::debug!(session = %id.session, "{id}: ignoring {} bytes of audio without playout", bytes.len())
+                debug!(session = %id.session, "{id}: ignoring {} bytes of audio without playout", bytes.len())
             }
         },
         // pings are answered by tungstenite; close frames end the stream before they get here

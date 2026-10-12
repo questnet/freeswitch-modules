@@ -2,6 +2,7 @@
 
 use audio_fork::fork::{Event, ForkId, Host, Resample};
 use freeswitch::{Resampler, Session};
+use tracing::debug;
 
 #[derive(Debug)]
 pub struct FsHost;
@@ -13,7 +14,7 @@ impl Host for FsHost {
             return;
         };
         let body = event.body();
-        tracing::debug!(session = %fork.session, "{fork}: firing {}", event.subclass().to_string_lossy());
+        debug!(session = %fork.session, "{fork}: firing {}", event.subclass().to_string_lossy());
         session.fire_custom(
             event.subclass(),
             &[(c"Audio-Fork-Bugname", &fork.bugname)],

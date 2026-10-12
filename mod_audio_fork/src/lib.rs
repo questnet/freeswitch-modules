@@ -22,6 +22,7 @@ use freeswitch::{
 };
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use tokio::runtime::Runtime;
+use tracing::{error, info};
 
 use crate::bug::BugData;
 use crate::host::{FsHost, FsResampler};
@@ -80,7 +81,7 @@ unsafe extern "C" fn load(
         unsafe { *module_interface = interface.as_ptr() };
         for (i, name) in SUBCLASSES.iter().enumerate() {
             if !freeswitch::reserve_subclass(name) {
-                tracing::error!("cannot reserve event subclass {}", name.to_string_lossy());
+                error!("cannot reserve event subclass {}", name.to_string_lossy());
                 for reserved in &SUBCLASSES[..i] {
                     freeswitch::free_subclass(reserved);
                 }
@@ -96,7 +97,7 @@ unsafe extern "C" fn load(
         *RUNTIME.lock() = Some(runtime);
         *REGISTRY.lock() = Some(Registry::default());
         interface.add_api(c"uuid_audio_fork", c"audio_fork API", SYNTAX, api);
-        tracing::info!("mod_audio_fork loaded");
+        info!("mod_audio_fork loaded");
         STATUS_SUCCESS
     })
 }
@@ -128,7 +129,7 @@ unsafe extern "C" fn shutdown() -> Status {
         for name in SUBCLASSES {
             freeswitch::free_subclass(name);
         }
-        tracing::info!("mod_audio_fork unloaded");
+        info!("mod_audio_fork unloaded");
         STATUS_SUCCESS
     })
 }
@@ -141,7 +142,7 @@ fn wait_for_closes() {
             return;
         }
         if Instant::now() > deadline {
-            tracing::error!(target: "crit", "unloading with {left} forks still attached");
+            error!(target: "crit", "unloading with {left} forks still attached");
             return;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -172,16 +173,16 @@ fn run_api(cmd: Option<&CStr>) -> String {
     let command = match api::parse(&tokens) {
         Ok(command) => command,
         Err(ParseError::Usage(reason)) => {
-            tracing::error!("uuid_audio_fork: {reason}");
+            error!("uuid_audio_fork: {reason}");
             return format!("-USAGE: {}\n", SYNTAX.to_string_lossy());
         }
         Err(e @ ParseError::Unsupported(_)) => {
-            tracing::error!("uuid_audio_fork: {e}");
+            error!("uuid_audio_fork: {e}");
             return FAILED.to_string();
         }
     };
     let Some(session) = Session::locate(&command.session) else {
-        tracing::error!("uuid_audio_fork: no session {}", command.session);
+        error!("uuid_audio_fork: no session {}", command.session);
         return FAILED.to_string();
     };
     let result = match command.action {
@@ -194,7 +195,7 @@ fn run_api(cmd: Option<&CStr>) -> String {
     match result {
         Ok(()) => OK.to_string(),
         Err(reason) => {
-            tracing::error!(session = %command.session, "uuid_audio_fork: {reason}");
+            error!(session = %command.session, "uuid_audio_fork: {reason}");
             FAILED.to_string()
         }
     }
@@ -297,7 +298,7 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
                 session.remove_media_bug(bug);
                 return Err(format!("{id}: the module is unloading"));
             }
-            tracing::info!(session = %uuid, "{id}: {:?} at codec {codec_rate} Hz, {}", start.direction, start.url);
+            info!(session = %uuid, "{id}: {:?} at codec {codec_rate} Hz, {}", start.direction, start.url);
             Ok(())
         }
         None => {
@@ -319,7 +320,7 @@ fn stop_fork(session: &Session, id: ForkId, text: Option<String>) -> Result<(), 
         (entry.handle.clone(), entry.bug)
     };
     let bug = bug.ok_or_else(|| format!("{id}: still starting"))?;
-    tracing::info!(session = %id.session, "{id}: stop");
+    info!(session = %id.session, "{id}: stop");
     handle.stop(text);
     // runs CLOSE, which takes the registry lock: none may be held here; false if a hangup got there first
     session.remove_media_bug(bug);
