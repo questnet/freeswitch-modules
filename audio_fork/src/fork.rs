@@ -326,7 +326,7 @@ async fn supervise(task: JoinHandle<()>, shared: Arc<Shared>, host: Arc<dyn Host
     }
     let message = panic_message(e.into_panic());
     let id = &shared.id;
-    tracing::error!(target: "panic", session = %id.session, "{id}: socket task panicked: {message}");
+    tracing::error!(target: "crit", session = %id.session, "{id}: socket task panicked: {message}");
     shared.fire(&*host, panic_event(&message));
     if !shared.closed.is_cancelled() {
         host.end(id);

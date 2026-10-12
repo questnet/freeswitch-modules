@@ -12,7 +12,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use audio_fork::{
@@ -23,7 +23,7 @@ use freeswitch::{
     MediaBug, ModuleInterface, SMBF_READ_STREAM, SMBF_STEREO, SMBF_WRITE_REPLACE,
     SMBF_WRITE_STREAM, STATUS_SUCCESS, Session, Status, Stream, sys,
 };
-use parking_lot::Mutex;
+use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use tokio::runtime::Runtime;
 
 use crate::{
@@ -38,9 +38,22 @@ const FAILED: &str = "-ERR Operation Failed\n";
 /// Created on load, shut down on unload (D6).
 static RUNTIME: Mutex<Option<Runtime>> = Mutex::new(None);
 
-/// Live forks, touched on start, stop, send_text, CLOSE and unload, never per frame.
-static FORKS: Mutex<Option<HashMap<ForkId, Entry>>> = Mutex::new(None);
+/// Touched on start, stop, send_text, CLOSE and unload, never per frame; `None` while not loaded.
+static REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+/// How long unload waits for FreeSWITCH to close the bugs of calls that are hanging up.
+const UNLOAD_WAIT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Default)]
+struct Registry {
+    forks: HashMap<ForkId, Entry>,
+    /// Set at unload: no new forks, so the ones left can only go.
+    unloading: bool,
+}
+
+fn registry() -> MappedMutexGuard<'static, Registry> {
+    MutexGuard::map(REGISTRY.lock(), |r| r.as_mut().expect("module not loaded"))
+}
 
 #[derive(Debug)]
 struct Entry {
@@ -83,7 +96,7 @@ unsafe extern "C" fn load(
             .build()
             .expect("building the tokio runtime");
         *RUNTIME.lock() = Some(runtime);
-        *FORKS.lock() = Some(HashMap::new());
+        *REGISTRY.lock() = Some(Registry::default());
         interface.add_api(c"uuid_audio_fork", c"audio_fork API", SYNTAX, api);
         tracing::info!("mod_audio_fork loaded");
         STATUS_SUCCESS
@@ -93,19 +106,23 @@ unsafe extern "C" fn load(
 unsafe extern "C" fn shutdown() -> Status {
     freeswitch::guard("shutdown", STATUS_SUCCESS, || {
         // FreeSWITCH must not call into this library once it is unmapped, so every bug goes first
-        let bugs: Vec<(ForkId, Option<MediaBug>)> = FORKS
-            .lock()
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|(id, e)| (id.clone(), e.bug))
-            .collect();
+        let bugs: Vec<(ForkId, Option<MediaBug>)> = {
+            let mut registry = registry();
+            registry.unloading = true;
+            registry
+                .forks
+                .iter()
+                .map(|(id, e)| (id.clone(), e.bug))
+                .collect()
+        };
         for (id, bug) in bugs {
             if let (Some(session), Some(bug)) = (Session::locate(&id.session), bug) {
                 session.remove_media_bug(bug);
             }
         }
-        *FORKS.lock() = None;
+        // a call that is hanging up cannot be located any more; FreeSWITCH closes its bug shortly
+        wait_for_closes();
+        *REGISTRY.lock() = None;
         if let Some(runtime) = RUNTIME.lock().take() {
             runtime.shutdown_timeout(Duration::from_secs(5));
         }
@@ -115,6 +132,21 @@ unsafe extern "C" fn shutdown() -> Status {
         tracing::info!("mod_audio_fork unloaded");
         STATUS_SUCCESS
     })
+}
+
+fn wait_for_closes() {
+    let deadline = Instant::now() + UNLOAD_WAIT;
+    loop {
+        let left = registry().forks.len();
+        if left == 0 {
+            return;
+        }
+        if Instant::now() > deadline {
+            tracing::error!(target: "crit", "unloading with {left} forks still attached");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 unsafe extern "C" fn api(
@@ -178,7 +210,7 @@ fn fork_id(session: &str, bugname: String) -> ForkId {
 
 fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String> {
     let id = fork_id(uuid, start.bugname.clone());
-    if FORKS.lock().as_ref().unwrap().contains_key(&id) {
+    if registry().forks.contains_key(&id) {
         return Err(format!("{id}: bug already attached"));
     }
     if !session.pre_answer() {
@@ -215,12 +247,14 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
     let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
     {
         // registered before the bug exists, so a CLOSE right after attaching finds the entry to remove
-        let mut forks = FORKS.lock();
-        let forks = forks.as_mut().unwrap();
-        if forks.contains_key(&id) {
+        let mut registry = registry();
+        if registry.unloading {
+            return Err(format!("{id}: the module is unloading"));
+        }
+        if registry.forks.contains_key(&id) {
             return Err(format!("{id}: bug already attached"));
         }
-        forks.insert(
+        registry.forks.insert(
             id.clone(),
             Entry {
                 serial,
@@ -249,14 +283,17 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
     }));
     match unsafe { session.add_media_bug(&id.bugname, bug::callback, data as *mut c_void, flags) } {
         Some(bug) => {
-            if let Some(entry) = FORKS
-                .lock()
-                .as_mut()
-                .unwrap()
-                .get_mut(&id)
-                .filter(|e| e.serial == serial)
-            {
-                entry.bug = Some(bug);
+            let unloading = {
+                let mut registry = registry();
+                if let Some(entry) = registry.forks.get_mut(&id).filter(|e| e.serial == serial) {
+                    entry.bug = Some(bug);
+                }
+                registry.unloading
+            };
+            if unloading {
+                // unload began after this fork registered and may have missed its bug
+                session.remove_media_bug(bug);
+                return Err(format!("{id}: the module is unloading"));
             }
             tracing::info!(session = %uuid, "{id}: streaming {} Hz from {codec_rate} Hz to {}", start.rate, start.url);
             Ok(())
@@ -272,10 +309,9 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
 
 fn stop_fork(session: &Session, id: ForkId, text: Option<String>) -> Result<(), String> {
     let (handle, bug) = {
-        let forks = FORKS.lock();
-        let entry = forks
-            .as_ref()
-            .unwrap()
+        let registry = registry();
+        let entry = registry
+            .forks
             .get(&id)
             .ok_or_else(|| format!("{id}: no such fork"))?;
         (entry.handle.clone(), entry.bug)
@@ -290,7 +326,7 @@ fn stop_fork(session: &Session, id: ForkId, text: Option<String>) -> Result<(), 
 
 /// The bug of a registered fork, once it is attached.
 fn bug_of(id: &ForkId) -> Option<MediaBug> {
-    FORKS.lock().as_ref().unwrap().get(id).and_then(|e| e.bug)
+    registry().forks.get(id).and_then(|e| e.bug)
 }
 
 /// `<uuid> test_panic_media|test_panic_task <bugname>` (T9), only in test builds.
@@ -306,12 +342,7 @@ fn test_hook(tokens: &[String]) -> Option<String> {
         _ => return None,
     };
     let id = fork_id(session, bugname.clone());
-    let handle = FORKS
-        .lock()
-        .as_ref()
-        .unwrap()
-        .get(&id)
-        .map(|e| e.handle.clone());
+    let handle = registry().forks.get(&id).map(|e| e.handle.clone());
     Some(match handle {
         Some(handle) => {
             handle.inject_panic(place);
@@ -323,10 +354,8 @@ fn test_hook(tokens: &[String]) -> Option<String> {
 
 fn send_text(id: ForkId, text: Option<String>) -> Result<(), String> {
     let handle = {
-        let forks = FORKS.lock();
-        forks
-            .as_ref()
-            .unwrap()
+        registry()
+            .forks
             .get(&id)
             .ok_or_else(|| format!("{id}: no such fork"))?
             .handle
@@ -342,10 +371,9 @@ fn send_text(id: ForkId, text: Option<String>) -> Result<(), String> {
 
 /// The fork's CLOSE: drops its registry entry unless a newer fork took the id meanwhile.
 fn closed(id: &ForkId, serial: u64) {
-    let mut forks = FORKS.lock();
-    // unload removes every bug before it drops the registry
-    let forks = forks.as_mut().expect("CLOSE after unload");
-    if forks.get(id).is_some_and(|e| e.serial == serial) {
-        forks.remove(id);
+    // unload waits for every CLOSE before it drops the registry
+    let mut registry = registry();
+    if registry.forks.get(id).is_some_and(|e| e.serial == serial) {
+        registry.forks.remove(id);
     }
 }

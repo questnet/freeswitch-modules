@@ -30,6 +30,7 @@ fn main() {
         Any playback_mode,
         Any hangup_races,
         Any unload_with_live_forks,
+        Any unload_during_hangups,
         Hooks panic_containment,
     ];
     fs_tests::run(scenarios);
@@ -511,4 +512,32 @@ async fn panic_containment(fs: &FreeSwitch) {
     assert!(fs.api("status").await.contains("UP"));
     one.hangup().await;
     two.hangup().await;
+}
+
+/// Unloading while calls are hanging up: their bugs are closed before the module goes, so
+/// FreeSWITCH neither crashes nor logs a CRIT, and every socket is closed.
+async fn unload_during_hangups(fs: &FreeSwitch) {
+    let sink = Sink::start(Duration::ZERO).await;
+    let mut calls = Vec::new();
+    for _ in 0..20 {
+        let call = fs.call(8000).await;
+        call.play_counter().await;
+        call.fork(&format!("start {} mono 8k going", sink.url("/")))
+            .await;
+        fs.event(&call.a, "going", "mod_audio_fork::connect").await;
+        calls.push(call);
+    }
+    for call in &calls {
+        fs.api(&format!("bgapi uuid_kill {}", call.a)).await;
+    }
+    fs.api_ok("unload mod_audio_fork").await;
+    all_closed(&sink).await;
+    assert!(fs.api("status").await.contains("UP"));
+    fs.api_ok("load mod_audio_fork").await;
+    let call = fs.call(8000).await;
+    call.fork(&format!("start {} mono 8k after", sink.url("/")))
+        .await;
+    fs.event(&call.a, "after", "mod_audio_fork::connect").await;
+    call.hangup().await;
+    all_closed(&sink).await;
 }
