@@ -3,14 +3,21 @@
 use fs_tests::{FreeSwitch, Scenario};
 
 fn main() {
-    let scenarios: &[(&str, Scenario)] = &[("module_loads", |fs| Box::pin(module_loads(fs)))];
+    let scenarios: &[(&str, Scenario)] = &[("load_lifecycle", |fs| Box::pin(load_lifecycle(fs)))];
     fs_tests::run(scenarios);
 }
 
-async fn module_loads(fs: &FreeSwitch) {
-    let reply = fs.api("load mod_audio_fork").await;
-    assert!(reply.starts_with("+OK"), "load: {reply}");
-    assert_eq!(fs.api("module_exists mod_audio_fork").await.trim(), "true");
-    let reply = fs.api("unload mod_audio_fork").await;
-    assert!(reply.starts_with("+OK"), "unload: {reply}");
+/// Unload and reload leave a working module that answers a bare command with its usage.
+async fn load_lifecycle(fs: &FreeSwitch) {
+    fs.api_ok("unload mod_audio_fork").await;
+    assert_eq!(fs.api("module_exists mod_audio_fork").await.trim(), "false");
+    fs.api_ok("load mod_audio_fork").await;
+    fs.api_ok("reload mod_audio_fork").await;
+    for cmd in [
+        "uuid_audio_fork",
+        "uuid_audio_fork 00000000-0000-0000-0000-000000000000",
+    ] {
+        let reply = fs.api(cmd).await;
+        assert!(reply.starts_with("-USAGE: "), "{cmd}: {reply}");
+    }
 }

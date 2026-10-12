@@ -75,7 +75,7 @@ pub struct FreeSwitch {
 }
 
 impl FreeSwitch {
-    /// Starts FreeSWITCH with the variant's module available (not loaded) and connects over ESL.
+    /// Starts FreeSWITCH, connects over ESL and loads the variant's module.
     pub async fn start(variant: Variant) -> Self {
         let layout = Layout::from_env();
         let base = TempDir::new();
@@ -134,14 +134,22 @@ impl FreeSwitch {
         let mut child = cmd.spawn().expect("spawning freeswitch");
 
         let (client, events) = connect_esl(&mut child).await;
-        FreeSwitch {
+        let fs = FreeSwitch {
             variant,
             client,
             events,
             child,
             log_file,
             _base: base,
-        }
+        };
+        fs.api_ok("load mod_audio_fork").await;
+        fs
+    }
+
+    /// Runs an API command that must reply `+OK`.
+    pub async fn api_ok(&self, command: &str) {
+        let reply = self.api(command).await;
+        assert!(reply.starts_with("+OK"), "{command}: {reply}");
     }
 
     /// Runs an API command and returns its reply body.
@@ -164,6 +172,9 @@ impl FreeSwitch {
             .expect("freeswitch did not exit within 30 s")
             .unwrap();
         let log = fs::read_to_string(&self.log_file).unwrap_or_default();
+        if env::var_os("FS_TESTS_DUMP_LOG").is_some() {
+            println!("---- freeswitch.log ----\n{log}---- end of freeswitch.log ----");
+        }
         let crits: Vec<&str> = log.lines().filter(|l| l.contains("[CRIT]")).collect();
         assert!(status.success(), "freeswitch exited with {status}");
         assert!(
