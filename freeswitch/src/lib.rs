@@ -201,6 +201,12 @@ pub fn free_subclass(name: &CStr) -> bool {
 #[derive(Debug)]
 pub struct Session(*mut sys::switch_core_session_t);
 
+impl Drop for Session {
+    fn drop(&mut self) {
+        unsafe { sys::switch_core_session_rwunlock(self.0) };
+    }
+}
+
 impl Session {
     pub fn locate(uuid: &str) -> Option<Session> {
         let uuid = c_string(uuid);
@@ -338,12 +344,6 @@ impl Session {
                 sys::switch_event_destroy(&mut event);
             }
         }
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        unsafe { sys::switch_core_session_rwunlock(self.0) };
     }
 }
 
