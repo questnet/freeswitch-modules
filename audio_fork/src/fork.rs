@@ -119,7 +119,6 @@ pub struct Config {
     pub capture: Option<Capture>,
     /// The rate frames arrive at from the media thread.
     pub codec_rate: u32,
-    pub metadata: Option<String>,
     /// The rate the server sends audio at, when it is played to the caller (write-replace).
     pub playout_rate: Option<u32>,
     pub timeouts: Timeouts,
@@ -264,16 +263,18 @@ impl State {
 pub struct Fork;
 
 impl Fork {
-    /// Spawns the socket task on `runtime`. Fails only when the metadata is longer than [`MAX_TEXT_LEN`].
+    /// Spawns the socket task on `runtime`; `metadata` is the first text frame once connected. Fails
+    /// only when it is longer than [`MAX_TEXT_LEN`].
     pub fn start(
         config: Config,
+        metadata: Option<String>,
         host: Arc<dyn Host>,
         events: &EventQueue,
         resamplers: Resamplers,
         runtime: &Handle,
     ) -> Result<(MediaSide, ForkHandle), TextError> {
         let mut state = State::default();
-        if let Some(metadata) = config.metadata.clone() {
+        if let Some(metadata) = metadata {
             state.push(metadata)?;
         }
         let shared = Arc::new(Shared {

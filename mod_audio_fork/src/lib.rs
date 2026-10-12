@@ -225,7 +225,6 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
         url: start.url.clone(),
         capture,
         codec_rate,
-        metadata: start.metadata.clone(),
         playout_rate: playout.map(|p| p.rate),
         timeouts: Timeouts::default(),
     };
@@ -241,8 +240,15 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
     };
     let runtime = RUNTIME.lock().as_ref().unwrap().handle().clone();
     let events = EVENTS.lock().clone().unwrap();
-    let (media, handle) = Fork::start(config, Arc::new(FsHost), &events, resamplers, &runtime)
-        .map_err(|e| format!("{id}: metadata: {e}"))?;
+    let (media, handle) = Fork::start(
+        config,
+        start.metadata.clone(),
+        Arc::new(FsHost),
+        &events,
+        resamplers,
+        &runtime,
+    )
+    .map_err(|e| format!("{id}: metadata: {e}"))?;
 
     let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
     {

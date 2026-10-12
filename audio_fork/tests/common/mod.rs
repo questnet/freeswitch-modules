@@ -86,13 +86,13 @@ pub fn start_with(
             rate: CaptureRate::try_from(8000).unwrap(),
         }),
         codec_rate: 8000,
-        metadata: metadata.map(str::to_string),
         playout_rate,
         timeouts,
     };
     let events = EventQueue::start(host.clone(), &Handle::current());
     let (media, handle) = Fork::start(
         config,
+        metadata.map(str::to_string),
         host.clone(),
         &events,
         Resamplers::default(),
