@@ -302,9 +302,9 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
             Ok(())
         }
         None => {
-            closed(&id, serial);
+            unregister(&id, serial);
             // FreeSWITCH never took the data: no CLOSE will come for it
-            unsafe { Box::from_raw(data) }.media.close();
+            unsafe { Box::from_raw(data) }.media.on_close();
             Err(format!("{id}: adding the media bug failed"))
         }
     }
@@ -373,8 +373,8 @@ fn send_text(id: ForkId, text: Option<String>) -> Result<(), String> {
     }
 }
 
-/// The fork's CLOSE: drops its registry entry unless a newer fork took the id meanwhile.
-fn closed(id: &ForkId, serial: u64) {
+/// At the bug's CLOSE: drops the fork's registry entry unless a newer fork took the id meanwhile.
+fn unregister(id: &ForkId, serial: u64) {
     // unload waits for every CLOSE before it drops the registry
     let mut registry = registry();
     if registry.forks.get(id).is_some_and(|e| e.serial == serial) {

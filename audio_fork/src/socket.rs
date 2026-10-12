@@ -1,5 +1,5 @@
 //! The socket task of one fork: connect, send the metadata, queued texts and capture audio,
-//! receive, and close at CLOSE.
+//! receive, and close the WebSocket at the bug's CLOSE.
 
 #[cfg(feature = "test-hooks")]
 use std::sync::atomic::Ordering;
@@ -29,8 +29,8 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// Why the open connection ended.
 #[derive(Debug)]
 enum End {
-    /// CLOSE ran: we close.
-    Closed,
+    /// The bug's CLOSE ran: we close the WebSocket.
+    BugClosed,
     /// The server closed or the connection broke.
     Dropped(String),
 }
@@ -51,7 +51,7 @@ pub(crate) async fn run(
     let id = &shared.id;
     let connected = select! {
         biased;
-        _ = shared.closed.cancelled() => {
+        _ = shared.bug_closed.cancelled() => {
             // hung up or stopped while connecting: the connection attempt is dropped, nothing is sent
             debug!(session = %id.session, "{id}: closed while connecting");
             shared.state.lock().phase = Phase::Ended;
@@ -64,7 +64,7 @@ pub(crate) async fn run(
         Ok(Err(e)) => return connect_failed(&shared, e.to_string()).await,
         Err(_) => return connect_failed(&shared, "connect timed out".to_string()).await,
     };
-    if shared.closed.is_cancelled() || !shared.state.lock().open() {
+    if shared.bug_closed.is_cancelled() || !shared.state.lock().open() {
         // stopped or closed during the handshake: nothing is sent, not even the queued texts
         debug!(session = %id.session, "{id}: stopped while connecting");
         shared.state.lock().phase = Phase::Ended;
@@ -76,7 +76,7 @@ pub(crate) async fn run(
 
     let end = stream(&mut socket, &shared, &*host, &mut capture, &mut inbound).await;
     match end {
-        End::Closed => {
+        End::BugClosed => {
             let flushed = time::timeout(config.timeouts.close, close(&mut socket, &shared)).await;
             shared.state.lock().phase = Phase::Ended;
             match flushed {
@@ -138,7 +138,7 @@ async fn connect_failed(shared: &Shared, reason: String) {
     shared.fire(Event::ConnectFailed { reason }).await;
 }
 
-/// Sends texts (in order, before any audio queued after them) and capture audio until CLOSE or the connection ends.
+/// Sends texts (in order, before any audio queued after them) and capture audio until the bug's CLOSE or the connection ends.
 async fn stream(
     socket: &mut Socket,
     shared: &Shared,
@@ -167,7 +167,7 @@ async fn stream(
         }
         select! {
             biased;
-            _ = shared.closed.cancelled() => return End::Closed,
+            _ = shared.bug_closed.cancelled() => return End::BugClosed,
             _ = shared.wake.notified() => {
                 #[cfg(feature = "test-hooks")]
                 if shared.inject.task.swap(false, Ordering::AcqRel) {
@@ -184,14 +184,14 @@ async fn stream(
     }
 }
 
-/// A send that gives up at CLOSE, so a stalled server cannot keep the fork alive.
+/// A send that gives up at the bug's CLOSE, so a stalled server cannot keep the fork alive.
 async fn send(socket: &mut Socket, shared: &Shared, message: Message) -> Result<(), End> {
-    // the send first: a text already taken off the queue must not be lost to a CLOSE that came
-    // meanwhile; the token only ends a send that stalls
+    // the send first: a text already taken off the queue must not be lost to the bug's CLOSE
+    // coming meanwhile; the token only ends a send that stalls
     select! {
         biased;
         sent = socket.send(message) => sent.map_err(|e| End::Dropped(e.to_string())),
-        _ = shared.closed.cancelled() => Err(End::Closed),
+        _ = shared.bug_closed.cancelled() => Err(End::BugClosed),
     }
 }
 
@@ -266,7 +266,7 @@ fn parse(text: &str) -> Request {
     }
 }
 
-/// After CLOSE: the texts still queued (a final `stop` text among them), then the close frame.
+/// After the bug's CLOSE: the texts still queued (a final `stop` text among them), then the close frame.
 async fn close(socket: &mut Socket, shared: &Shared) -> Result<(), tungstenite::Error> {
     loop {
         let Some(text) = shared.state.lock().pop() else {

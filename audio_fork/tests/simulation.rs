@@ -38,7 +38,7 @@ async fn metadata_then_queued_texts_then_audio() {
             .chunks(2)
             .all(|s| i16::from_le_bytes([s[0], s[1]]) == 7)
     );
-    media.close();
+    media.on_close();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -52,14 +52,14 @@ async fn text_limits() {
     }
     assert_eq!(handle.send_text("x".to_string()), Err(TextError::QueueFull));
     let _held = server.pending().await;
-    media.close();
+    media.on_close();
 
     let (media, handle, _) = start(&server.url("/"), None, Timeouts::default());
     for _ in 0..1024 {
         handle.send_text("x".to_string()).unwrap();
     }
     assert_eq!(handle.send_text("x".to_string()), Err(TextError::QueueFull));
-    media.close();
+    media.on_close();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -87,7 +87,7 @@ async fn refused_connect_fires_connect_failed_once() {
     }
     assert_eq!(handle.send_text("x".to_string()), Err(TextError::NotOpen));
     assert_eq!(host.events().len(), 1);
-    media.close();
+    media.on_close();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -108,7 +108,7 @@ async fn handshake_timeout_fires_connect_failed() {
             reason: "connect timed out".to_string()
         }
     );
-    media.close();
+    media.on_close();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -139,7 +139,7 @@ async fn stalled_server_overruns_once() {
         .filter(|e| **e == Event::BufferOverrun)
         .count();
     assert_eq!(overruns, 1);
-    media.close();
+    media.on_close();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -154,7 +154,7 @@ async fn dropped_connection_fires_disconnect() {
     assert_eq!(handle.send_text("x".to_string()), Err(TextError::NotOpen));
     time::sleep(Duration::from_millis(100)).await;
     assert_eq!(host.events(), vec![Event::Connect, Event::Disconnect(None)]);
-    media.close();
+    media.on_close();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -170,7 +170,7 @@ async fn stop_sends_the_final_text_before_closing() {
         handle.send_text("late".to_string()),
         Err(TextError::NotOpen)
     );
-    media.close();
+    media.on_close();
     assert_eq!(conn.next_text().await, Some("{\"final\":true}".to_string()));
     assert_eq!(conn.next().await, Some(Frame::Close));
     assert_eq!(conn.next().await, None);
@@ -185,7 +185,7 @@ async fn stop_while_connecting_sends_nothing() {
     handle.send_text("queued".to_string()).unwrap();
     media.on_read(&FRAME);
     handle.stop(Some("final".to_string()));
-    media.close();
+    media.on_close();
     // the connection attempt is dropped: the handshake fails, or the connection ends at once
     if let Some(mut conn) = pending.try_accept().await {
         assert_eq!(conn.next().await, None);
@@ -200,10 +200,10 @@ async fn stop_during_the_handshake_sends_nothing_before_close() {
     let (media, handle, host) = start(&server.url("/"), Some("{}"), Timeouts::default());
     let pending = server.pending().await;
     handle.stop(None);
-    // CLOSE only comes once the handshake is done
+    // the bug's CLOSE only comes once the handshake is done
     let mut conn = pending.accept().await;
     assert_eq!(conn.next().await, Some(Frame::Close));
-    media.close();
+    media.on_close();
     time::sleep(Duration::from_millis(100)).await;
     assert_eq!(host.events(), vec![]);
 }
@@ -218,7 +218,7 @@ async fn hangup_during_connect_cancels_without_events() {
     };
     let (media, _handle, host) = start(&server.url("/"), None, timeouts);
     let _held = server.pending().await;
-    media.close();
+    media.on_close();
     time::sleep(Duration::from_millis(300)).await;
     assert_eq!(host.events(), vec![]);
 }
@@ -254,7 +254,7 @@ async fn inbound_messages_fire_their_events() {
         ]
     );
     assert_eq!(*host.breaks.lock().unwrap(), vec!["session".to_string()]);
-    media.close();
+    media.on_close();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -269,7 +269,7 @@ async fn message_over_the_receive_limit_disconnects() {
     ));
     host.wait_for(|e| *e == Event::Disconnect(None)).await;
     assert_eq!(host.events(), vec![Event::Connect, Event::Disconnect(None)]);
-    media.close();
+    media.on_close();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -281,7 +281,7 @@ async fn binary_without_playout_is_ignored() {
     conn.send_binary(le_bytes([1; 4000]));
     conn.send_text(r#"{"type":"json"}"#);
     host.wait_for(|e| matches!(e, Event::Json(_))).await;
-    media.close();
+    media.on_close();
 }
 
 fn le_bytes(samples: impl IntoIterator<Item = i16>) -> Vec<u8> {
@@ -314,7 +314,7 @@ async fn playout_starts_after_the_prebuffer_and_kill_audio_discards_it() {
     let mut frame = [0; 160];
     media.on_write_replace(&mut frame);
     assert_eq!(frame, [0; 160], "buffered audio played after killAudio");
-    media.close();
+    media.on_close();
 }
 
 /// Polls the write-replace side, as the media thread does every 20 ms, until a frame carries audio.
@@ -346,7 +346,7 @@ async fn audio_sent_right_after_kill_audio_is_played() {
     conn.send_text(r#"{"type":"json"}"#);
     host.wait_for(|e| matches!(e, Event::Json(_))).await;
     assert_eq!(first_played(&mut media).await, 20001);
-    media.close();
+    media.on_close();
 }
 
 /// The first sample of the first frame that carries audio.
@@ -379,7 +379,7 @@ async fn kill_audio_drops_what_the_prebuffer_still_holds() {
         20001,
         "the killed stream's tail was played"
     );
-    media.close();
+    media.on_close();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -388,7 +388,7 @@ async fn dropping_the_media_side_ends_the_fork() {
     let (media, _handle, host) = start(&server.url("/"), None, Timeouts::default());
     let mut conn = server.accept().await;
     host.wait_for(|e| *e == Event::Connect).await;
-    // a start that loses a race, or a panic in CLOSE, drops it without close()
+    // a start that loses a race, or a panic in the bug's CLOSE, drops it without on_close()
     drop(media);
     assert_eq!(conn.next().await, Some(Frame::Close));
     assert_eq!(conn.next().await, None);

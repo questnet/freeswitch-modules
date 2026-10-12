@@ -119,7 +119,7 @@ Every `extern "C"` callback the layer defines (API function, media bug callback,
 
 ### Ownership and threads
 
-- The media bug's user data is a `Box<MediaSide>` handed to FreeSWITCH in `start` and reclaimed in `SWITCH_ABC_TYPE_CLOSE`. FreeSWITCH guarantees CLOSE runs exactly once, so this is the single teardown point; `stop` only removes the bug.
+- The media bug's user data is a `Box<MediaSide>` handed to FreeSWITCH in `start` and reclaimed in `SWITCH_ABC_TYPE_CLOSE`. FreeSWITCH guarantees CLOSE runs exactly once, so this is the single teardown point; `stop` only removes the bug. In the code, "the bug's CLOSE" always means this callback (`MediaSide::on_close`, the `bug_closed` token); `close` alone is the WebSocket's.
 - `MediaSide` holds the capture producer, the playout buffer (`Arc<Mutex<VecDeque<i16>>>` plus an `AtomicBool` clear flag), a control sender to the task (texts, close-with-final-text), a `Notify` to wake the task after each pushed frame, and the overrun-notified flag.
 - The task owns the capture consumer and the socket. It never holds a session pointer: to fire an event or set `CF_BREAK` it locates the session by UUID, so a hung-up call simply makes the lookup fail. This removes the class of lifetime races the C code fixed piecemeal.
 - A global registry (`Mutex<HashMap<(uuid, bugname), CancellationToken>>`) is touched only on start, close and unload, never per frame. On unload, every registered fork's bug is removed (locate by UUID, `media_bug_remove`), then the runtime shuts down with a timeout. FreeSWITCH must not call into unmapped code after unload.

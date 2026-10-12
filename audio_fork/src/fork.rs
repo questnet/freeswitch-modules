@@ -104,7 +104,7 @@ pub trait Host: Send + Sync + 'static {
     fn fire(&self, fork: &ForkId, event: Event);
     /// Interrupts whatever the channel is playing (`CF_BREAK`).
     fn break_playback(&self, session: &str);
-    /// Removes the fork's bug after its task died; CLOSE follows as for a `stop`.
+    /// Removes the fork's bug after its task died; the bug's CLOSE follows as for a `stop`.
     fn end(&self, fork: &ForkId);
 }
 
@@ -148,7 +148,7 @@ impl fmt::Debug for Resamplers {
 pub struct Timeouts {
     /// For the TCP connect, TLS and WebSocket handshake together.
     pub connect: Duration,
-    /// For sending the remaining texts and the close frame after CLOSE.
+    /// For sending the remaining texts and the close frame after the bug's CLOSE.
     pub close: Duration,
 }
 
@@ -186,8 +186,8 @@ pub(crate) struct Shared {
     pub state: Mutex<State>,
     /// Wakes the task: a frame was pushed, a text queued, or the fork is closing.
     pub wake: Notify,
-    /// Cancelled at CLOSE; the task then flushes texts, sends the close frame and ends, and no event is queued any more.
-    pub closed: CancellationToken,
+    /// Cancelled at the bug's CLOSE; the task then flushes texts, sends the close frame and ends, and no event is queued any more.
+    pub bug_closed: CancellationToken,
     events: EventQueue,
     /// Present when server audio is played to the caller.
     pub playout: Option<Playout>,
@@ -196,16 +196,16 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    /// Queues the event unless CLOSE ran, or runs while it waits for room; what was queued before
+    /// Queues the event unless the bug's CLOSE ran, or runs while it waits for room; what was queued before
     /// CLOSE is still fired. A CLOSE between the check and the send lets this one event through,
     /// accepted as a new fork with the same bugname fires nothing before its handshake.
     pub async fn fire(&self, event: Event) {
-        if self.closed.is_cancelled() {
+        if self.bug_closed.is_cancelled() {
             return;
         }
         select! {
             biased;
-            _ = self.closed.cancelled() => {}
+            _ = self.bug_closed.cancelled() => {}
             _ = self.events.fire(self.id.clone(), event) => {}
         }
     }
@@ -244,7 +244,7 @@ pub(crate) enum Phase {
     Connecting,
     /// Captured audio is buffered only now: before, nothing could send it, and after, nothing will.
     Open,
-    /// `stop` was called or CLOSE ran: no more texts are accepted, the task flushes what is queued.
+    /// `stop` was called or the bug's CLOSE ran: no more texts are accepted, the task flushes what is queued.
     Closing,
     Ended,
 }
@@ -263,7 +263,7 @@ impl State {
         }
     }
 
-    fn close(&mut self) {
+    fn begin_closing(&mut self) {
         if self.phase != Phase::Ended {
             self.phase = Phase::Closing;
         }
@@ -310,7 +310,7 @@ impl Fork {
             id: config.id.clone(),
             state: Mutex::new(state),
             wake: Notify::new(),
-            closed: CancellationToken::new(),
+            bug_closed: CancellationToken::new(),
             events: events.clone(),
             playout: config.playout_rate.map(|_| Playout::default()),
             #[cfg(feature = "test-hooks")]
@@ -356,7 +356,7 @@ async fn supervise(task: JoinHandle<()>, shared: Arc<Shared>, host: Arc<dyn Host
     let id = &shared.id;
     error!(target: "crit", session = %id.session, "{id}: socket task panicked: {message}");
     shared.fire(panic_event(&message)).await;
-    if !shared.closed.is_cancelled() {
+    if !shared.bug_closed.is_cancelled() {
         host.end(id);
     }
 }
@@ -437,9 +437,9 @@ impl MediaSide {
     }
 
     /// The media thread must not wait for room in the queue, so a task does. It queues the event
-    /// even when CLOSE comes meanwhile, as the event happened before; a panic's CLOSE follows at once.
+    /// even when the bug's CLOSE comes meanwhile, as the event happened before; a panic's CLOSE follows at once.
     fn fire_soon(&self, event: Event) {
-        if self.shared.closed.is_cancelled() {
+        if self.shared.bug_closed.is_cancelled() {
             return;
         }
         let shared = self.shared.clone();
@@ -459,14 +459,14 @@ impl MediaSide {
     }
 
     /// The bug's CLOSE: the task sends what is queued, closes the socket and ends.
-    pub fn close(self) {}
+    pub fn on_close(self) {}
 }
 
-// a media side dropped any other way (a start that lost a race, a panic in CLOSE) must not leave its task running
+// a media side dropped any other way (a start that lost a race, a panic in the bug's CLOSE) must not leave its task running
 impl Drop for MediaSide {
     fn drop(&mut self) {
-        self.shared.state.lock().close();
-        self.shared.closed.cancel();
+        self.shared.state.lock().begin_closing();
+        self.shared.bug_closed.cancel();
     }
 }
 
@@ -500,7 +500,7 @@ impl ForkHandle {
     }
 
     /// Accepts no more texts; `text` is the last frame before the close, if the connection is open.
-    /// The fork ends when the host removes the bug (CLOSE).
+    /// The fork ends when the host removes the bug (its CLOSE).
     pub fn stop(&self, text: Option<String>) {
         let mut state = self.shared.state.lock();
         if let Some(text) = text.filter(|_| state.phase == Phase::Open) {
@@ -509,7 +509,7 @@ impl ForkHandle {
                 warn!(session = %self.shared.id.session, "{}: final text not sent: {e}", self.shared.id);
             }
         }
-        state.close();
+        state.begin_closing();
         drop(state);
         self.shared.wake.notify_one();
     }

@@ -45,8 +45,8 @@ pub unsafe extern "C" fn callback(
             // CLOSE runs exactly once, after every other callback: the user data is reclaimed here only
             let BugData { media, id, serial } = *unsafe { Box::from_raw(data) };
             // the fork stops queueing events before a new fork with this bugname can start
-            media.close();
-            crate::closed(&id, serial);
+            media.on_close();
+            crate::unregister(&id, serial);
             info!(session = %id.session, "{id}: bug closed");
             TRUE
         }

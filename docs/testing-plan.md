@@ -55,7 +55,7 @@ pub trait Resample: Send {
 
 - `MediaSide::on_read(&mut self, samples: &[i16])` — capture frame at the codec rate.
 - `MediaSide::on_write_replace(&mut self, frame: &mut [i16])` — mix playout into the outgoing frame.
-- `MediaSide::close(self)` — the bug's CLOSE.
+- `MediaSide::on_close(self)` — the bug's CLOSE.
 
 Control (`send_text`, `stop`) goes through a cloneable `ForkHandle`. The glue's only jobs are turning FreeSWITCH callbacks into these calls and implementing `Host` and `Resample`.
 

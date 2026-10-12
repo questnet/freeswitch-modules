@@ -1,7 +1,7 @@
 //! Events of all forks fired by one task, in the order the forks queue them.
 //!
-//! Neither CLOSE nor the media thread waits for an event being created. A fork queues nothing after
-//! its CLOSE (`Shared::fire`), so none of its events can come after those of a new fork with the
+//! Neither the bug's CLOSE nor the media thread waits for an event being created. A fork queues
+//! nothing after its bug's CLOSE (`Shared::fire`), so none of its events can come after those of a new fork with the
 //! same bugname.
 
 use std::sync::Arc;

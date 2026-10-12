@@ -37,6 +37,6 @@ async fn task_panic_ends_that_fork_only() {
     two.on_read(&FRAME);
     assert_eq!(two_conn.audio(320).await.len(), 320);
     assert!(two_host.ends.lock().unwrap().is_empty());
-    one.close();
-    two.close();
+    one.on_close();
+    two.on_close();
 }
