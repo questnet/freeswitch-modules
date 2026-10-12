@@ -3,8 +3,10 @@
 
 use std::fmt::Write;
 
-use tracing::{Event, Level, Subscriber, field::Field};
-use tracing_subscriber::{Layer, layer::Context, prelude::*};
+use tracing::field::Field;
+use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::{Layer, prelude::*};
 
 pub fn install() {
     // already set when the module is reloaded without the library being unmapped in between
