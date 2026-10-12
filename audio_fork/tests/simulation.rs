@@ -1,0 +1,256 @@
+//! Simulation tier (docs/testing-plan.md#simulation-tier): the core against a scripted server,
+//! without FreeSWITCH. Frames are pushed by count; races are made deterministic by holding the
+//! server's handshake until the test releases it.
+
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use audio_fork::fork::{
+    Config, Event, Fork, ForkHandle, ForkId, Host, MAX_TEXT_LEN, MediaSide, TextError, Timeouts,
+};
+use test_server::{Frame, Server};
+use tokio::{runtime::Handle, sync::Notify};
+
+/// 20 ms at 8 kHz.
+const FRAME: [i16; 160] = [7; 160];
+
+#[derive(Debug, Default)]
+struct FakeHost {
+    events: Mutex<Vec<Event>>,
+    fired: Notify,
+}
+
+impl Host for FakeHost {
+    fn fire(&self, _fork: &ForkId, event: Event) {
+        self.events.lock().unwrap().push(event);
+        self.fired.notify_waiters();
+    }
+
+    fn break_playback(&self, _session: &str) {}
+}
+
+impl FakeHost {
+    fn events(&self) -> Vec<Event> {
+        self.events.lock().unwrap().clone()
+    }
+
+    async fn wait_for(&self, wanted: impl Fn(&Event) -> bool) -> Event {
+        let wait = async {
+            loop {
+                let fired = self.fired.notified();
+                if let Some(e) = self.events().into_iter().find(&wanted) {
+                    return e;
+                }
+                fired.await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), wait)
+            .await
+            .unwrap_or_else(|_| panic!("event not fired; got {:?}", self.events()))
+    }
+}
+
+fn start(
+    url: &str,
+    metadata: Option<&str>,
+    timeouts: Timeouts,
+) -> (MediaSide, ForkHandle, Arc<FakeHost>) {
+    let host = Arc::new(FakeHost::default());
+    let config = Config {
+        id: ForkId {
+            session: "session".to_string(),
+            bugname: "bug".to_string(),
+        },
+        url: url.parse().unwrap(),
+        channels: 1,
+        codec_rate: 8000,
+        rate: 8000,
+        metadata: metadata.map(str::to_string),
+        timeouts,
+    };
+    let (media, handle) = Fork::start(config, host.clone(), None, &Handle::current()).unwrap();
+    (media, handle, host)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn metadata_then_queued_texts_then_audio() {
+    let mut server = Server::start().await;
+    let (mut media, handle, host) =
+        start(&server.url("/fork"), Some("{\"m\":1}"), Timeouts::default());
+    handle.send_text("t1".to_string()).unwrap();
+    handle.send_text("t2".to_string()).unwrap();
+    // nobody to send to yet: dropped, not buffered
+    media.on_read(&[1; 160]);
+    let mut conn = server.accept().await;
+    assert_eq!(conn.protocol.as_deref(), Some("audio.drachtio.org"));
+    assert_eq!(conn.path, "/fork");
+    host.wait_for(|e| *e == Event::Connect).await;
+    media.on_read(&FRAME);
+    assert_eq!(
+        conn.next().await,
+        Some(Frame::Text("{\"m\":1}".to_string()))
+    );
+    assert_eq!(conn.next().await, Some(Frame::Text("t1".to_string())));
+    assert_eq!(conn.next().await, Some(Frame::Text("t2".to_string())));
+    let audio = conn.audio(320).await;
+    assert_eq!(audio.len(), 320);
+    assert!(
+        audio
+            .chunks(2)
+            .all(|s| i16::from_le_bytes([s[0], s[1]]) == 7)
+    );
+    media.close();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn text_limits() {
+    let mut server = Server::start().await;
+    let (media, handle, _) = start(&server.url("/"), None, Timeouts::default());
+    let mb = "x".repeat(MAX_TEXT_LEN);
+    assert_eq!(handle.send_text(format!("{mb}x")), Err(TextError::TooLong));
+    for _ in 0..4 {
+        handle.send_text(mb.clone()).unwrap();
+    }
+    assert_eq!(handle.send_text("x".to_string()), Err(TextError::QueueFull));
+    let _held = server.pending().await;
+    media.close();
+
+    let (media, handle, _) = start(&server.url("/"), None, Timeouts::default());
+    for _ in 0..1024 {
+        handle.send_text("x".to_string()).unwrap();
+    }
+    assert_eq!(handle.send_text("x".to_string()), Err(TextError::QueueFull));
+    media.close();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refused_connect_fires_connect_failed_once() {
+    // a port nobody listens on
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let (mut media, handle, host) = start(
+        &format!("ws://127.0.0.1:{port}/"),
+        None,
+        Timeouts::default(),
+    );
+    let Event::ConnectFailed { reason } = host
+        .wait_for(|e| matches!(e, Event::ConnectFailed { .. }))
+        .await
+    else {
+        unreachable!()
+    };
+    assert!(!reason.is_empty());
+    for _ in 0..1000 {
+        media.on_read(&FRAME);
+    }
+    assert_eq!(handle.send_text("x".to_string()), Err(TextError::NotOpen));
+    assert_eq!(host.events().len(), 1);
+    media.close();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn handshake_timeout_fires_connect_failed() {
+    let mut server = Server::start().await;
+    let timeouts = Timeouts {
+        connect: Duration::from_millis(200),
+        ..Timeouts::default()
+    };
+    let (media, _handle, host) = start(&server.url("/"), None, timeouts);
+    let _held = server.pending().await;
+    let failed = host
+        .wait_for(|e| matches!(e, Event::ConnectFailed { .. }))
+        .await;
+    assert_eq!(
+        failed,
+        Event::ConnectFailed {
+            reason: "connect timed out".to_string()
+        }
+    );
+    media.close();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stalled_server_overruns_once() {
+    let mut server = Server::start().await;
+    let (mut media, _handle, host) = start(&server.url("/"), None, Timeouts::default());
+    let conn = server.accept().await;
+    host.wait_for(|e| *e == Event::Connect).await;
+    conn.stall();
+    // until the socket buffers and then the 2 s ring are full; one hour of audio is far more than that
+    for i in 0..180_000 {
+        media.on_read(&FRAME);
+        if host.events().contains(&Event::BufferOverrun) {
+            break;
+        }
+        if i % 50 == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+    host.wait_for(|e| *e == Event::BufferOverrun).await;
+    for _ in 0..1000 {
+        media.on_read(&FRAME);
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let overruns = host
+        .events()
+        .iter()
+        .filter(|e| **e == Event::BufferOverrun)
+        .count();
+    assert_eq!(overruns, 1);
+    media.close();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropped_connection_fires_disconnect() {
+    let mut server = Server::start().await;
+    let (mut media, handle, host) = start(&server.url("/"), None, Timeouts::default());
+    let conn = server.accept().await;
+    host.wait_for(|e| *e == Event::Connect).await;
+    conn.drop_tcp();
+    host.wait_for(|e| *e == Event::Disconnect(None)).await;
+    media.on_read(&FRAME);
+    assert_eq!(handle.send_text("x".to_string()), Err(TextError::NotOpen));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(host.events(), vec![Event::Connect, Event::Disconnect(None)]);
+    media.close();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_sends_the_final_text_before_closing() {
+    let mut server = Server::start().await;
+    let (mut media, handle, host) = start(&server.url("/"), None, Timeouts::default());
+    let mut conn = server.accept().await;
+    host.wait_for(|e| *e == Event::Connect).await;
+    media.on_read(&FRAME);
+    conn.audio(320).await;
+    handle.stop(Some("{\"final\":true}".to_string()));
+    assert_eq!(
+        handle.send_text("late".to_string()),
+        Err(TextError::NotOpen)
+    );
+    media.close();
+    assert_eq!(conn.next_text().await, Some("{\"final\":true}".to_string()));
+    assert_eq!(conn.next().await, Some(Frame::Close));
+    assert_eq!(conn.next().await, None);
+    assert_eq!(host.events(), vec![Event::Connect]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_while_connecting_sends_nothing() {
+    let mut server = Server::start().await;
+    let (mut media, handle, host) = start(&server.url("/"), Some("{}"), Timeouts::default());
+    let pending = server.pending().await;
+    handle.send_text("queued".to_string()).unwrap();
+    media.on_read(&FRAME);
+    handle.stop(Some("final".to_string()));
+    media.close();
+    let mut conn = pending.accept().await;
+    assert_eq!(conn.next().await, Some(Frame::Close));
+    assert_eq!(conn.next().await, None);
+    assert_eq!(host.events(), vec![]);
+}

@@ -3,7 +3,7 @@
 
 use std::{
     any::Any,
-    ffi::{CStr, CString, c_char, c_int},
+    ffi::{CStr, CString, c_char, c_int, c_void},
     panic::{AssertUnwindSafe, catch_unwind},
     ptr,
 };
@@ -214,10 +214,236 @@ impl Session {
     pub fn as_ptr(&self) -> *mut sys::switch_core_session_t {
         self.0
     }
+
+    fn channel(&self) -> *mut sys::switch_channel_t {
+        unsafe { sys::switch_core_session_get_channel(self.0) }
+    }
+
+    pub fn pre_answer(&self) -> bool {
+        unsafe {
+            sys::switch_channel_perform_pre_answer(
+                self.channel(),
+                c"mod_audio_fork".as_ptr(),
+                c"pre_answer".as_ptr(),
+                0,
+            ) == STATUS_SUCCESS
+        }
+    }
+
+    /// The rate of the read codec; `None` while the channel has no media set up.
+    pub fn read_rate(&self) -> Option<u32> {
+        unsafe {
+            let codec = sys::switch_core_session_get_read_codec(self.0);
+            if codec.is_null() || (*codec).implementation.is_null() {
+                return None;
+            }
+            let mut implementation = sys::switch_codec_implementation_t::default();
+            (sys::switch_core_session_get_read_impl(self.0, &mut implementation) == STATUS_SUCCESS)
+                .then_some(implementation.actual_samples_per_second)
+        }
+    }
+
+    /// Interrupts what the channel is playing, like `uuid_break`.
+    pub fn set_break(&self) {
+        unsafe {
+            sys::switch_channel_set_flag_value(
+                self.channel(),
+                sys::switch_channel_flag_t::CF_BREAK,
+                2,
+            )
+        };
+    }
+
+    /// Attaches a media bug. The callback gets `user_data` until CLOSE, which FreeSWITCH runs exactly once
+    /// unless this fails, in which case `user_data` was never handed over.
+    ///
+    /// # Safety
+    /// `callback` must accept `user_data` for every callback type until CLOSE.
+    pub unsafe fn add_media_bug(
+        &self,
+        name: &str,
+        callback: BugCallback,
+        user_data: *mut c_void,
+        flags: u32,
+    ) -> Option<MediaBug> {
+        let name = c_string(name);
+        let mut bug = ptr::null_mut();
+        let status = unsafe {
+            sys::switch_core_media_bug_add(
+                self.0,
+                name.as_ptr(),
+                ptr::null(),
+                Some(callback),
+                user_data,
+                0,
+                flags,
+                &mut bug,
+            )
+        };
+        (status == STATUS_SUCCESS).then_some(MediaBug(bug))
+    }
+
+    /// Removes the bug (running its CLOSE in this thread) if it is still attached; false if it is gone already.
+    pub fn remove_media_bug(&self, bug: MediaBug) -> bool {
+        // bugs live in the session pool, so a stale pointer is still readable while the session is locked
+        let mut raw = bug.0;
+        unsafe { sys::switch_core_media_bug_remove(self.0, &mut raw) == STATUS_SUCCESS }
+    }
+
+    /// Fires a `SWITCH_EVENT_CUSTOM` event with the channel's data.
+    pub fn fire_custom(&self, subclass: &CStr, headers: &[(&CStr, &str)], body: Option<&str>) {
+        unsafe {
+            let mut event = ptr::null_mut();
+            let created = sys::switch_event_create_subclass_detailed(
+                c"mod_audio_fork".as_ptr(),
+                c"fire_custom".as_ptr(),
+                0,
+                &mut event,
+                sys::switch_event_types_t::SWITCH_EVENT_CUSTOM,
+                subclass.as_ptr(),
+            );
+            assert_eq!(
+                created,
+                STATUS_SUCCESS,
+                "creating event {}",
+                subclass.to_string_lossy()
+            );
+            sys::switch_channel_event_set_data(self.channel(), event);
+            for (name, value) in headers {
+                let value = c_string(value);
+                sys::switch_event_add_header_string(
+                    event,
+                    sys::switch_stack_t::SWITCH_STACK_BOTTOM,
+                    name.as_ptr(),
+                    value.as_ptr(),
+                );
+            }
+            if let Some(body) = body {
+                let body = c_string(body);
+                sys::switch_event_add_body(event, c"%s".as_ptr(), body.as_ptr());
+            }
+            sys::switch_event_fire_detailed(
+                c"mod_audio_fork".as_ptr(),
+                c"fire_custom".as_ptr(),
+                0,
+                &mut event,
+                ptr::null_mut(),
+            );
+            // fire takes the event; it is left behind only if firing failed
+            if !event.is_null() {
+                sys::switch_event_destroy(&mut event);
+            }
+        }
+    }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
         unsafe { sys::switch_core_session_rwunlock(self.0) };
+    }
+}
+
+pub type BugCallback = unsafe extern "C" fn(
+    bug: *mut sys::switch_media_bug_t,
+    user_data: *mut c_void,
+    abc: sys::switch_abc_type_t::Type,
+) -> sys::switch_bool_t::Type;
+
+pub use sys::switch_abc_type_t::{
+    SWITCH_ABC_TYPE_CLOSE as ABC_CLOSE, SWITCH_ABC_TYPE_READ as ABC_READ,
+    SWITCH_ABC_TYPE_WRITE_REPLACE as ABC_WRITE_REPLACE,
+};
+pub use sys::switch_bool_t::{SWITCH_FALSE as FALSE, SWITCH_TRUE as TRUE};
+pub use sys::switch_media_bug_flag_enum_t::{
+    SMBF_READ_STREAM, SMBF_STEREO, SMBF_WRITE_REPLACE, SMBF_WRITE_STREAM,
+};
+
+/// A media bug pointer. Valid as long as its session is; whether it is still attached is FreeSWITCH's to say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaBug(*mut sys::switch_media_bug_t);
+
+// only ever dereferenced by FreeSWITCH, with the session locked
+unsafe impl Send for MediaBug {}
+
+impl MediaBug {
+    /// # Safety
+    /// `raw` must be the bug FreeSWITCH passed to the callback that is running.
+    pub unsafe fn from_raw(raw: *mut sys::switch_media_bug_t) -> Self {
+        MediaBug(raw)
+    }
+
+    /// Reads the captured frames available now, at the codec rate, interleaved for stereo.
+    /// Only from the bug's READ callback.
+    pub fn read_frames(&self, mut each: impl FnMut(&[i16])) {
+        let mut buf = [0i16; sys::SWITCH_RECOMMENDED_BUFFER_SIZE as usize / 2];
+        loop {
+            let mut frame = sys::switch_frame_t {
+                data: buf.as_mut_ptr() as *mut c_void,
+                buflen: sys::SWITCH_RECOMMENDED_BUFFER_SIZE,
+                ..Default::default()
+            };
+            if unsafe { sys::switch_core_media_bug_read(self.0, &mut frame, TRUE) }
+                != STATUS_SUCCESS
+            {
+                break;
+            }
+            let samples = frame.datalen as usize / 2;
+            if samples > 0 {
+                each(&buf[..samples]);
+            }
+        }
+    }
+}
+
+/// FreeSWITCH's speex resampler for interleaved 16 bit audio (D8).
+#[derive(Debug)]
+pub struct Resampler {
+    raw: *mut sys::switch_audio_resampler_t,
+    channels: usize,
+}
+
+// owned by one fork and used by one thread at a time
+unsafe impl Send for Resampler {}
+
+impl Resampler {
+    pub fn new(from_rate: u32, to_rate: u32, channels: usize) -> Self {
+        let mut raw = ptr::null_mut();
+        let status = unsafe {
+            sys::switch_resample_perform_create(
+                &mut raw,
+                from_rate,
+                to_rate,
+                sys::SWITCH_RECOMMENDED_BUFFER_SIZE,
+                sys::SWITCH_RESAMPLE_QUALITY as c_int,
+                channels as u32,
+                c"mod_audio_fork".as_ptr(),
+                c"resampler".as_ptr(),
+                0,
+            )
+        };
+        assert_eq!(
+            status, STATUS_SUCCESS,
+            "creating a resampler {from_rate} -> {to_rate}"
+        );
+        Resampler { raw, channels }
+    }
+
+    pub fn process(&mut self, input: &[i16], output: &mut Vec<i16>) {
+        unsafe {
+            // lengths are per channel; FreeSWITCH grows its output buffer as needed and does not write the input
+            let frames = (input.len() / self.channels) as u32;
+            let out =
+                sys::switch_resample_process(self.raw, input.as_ptr() as *mut i16, frames) as usize;
+            output.extend_from_slice(std::slice::from_raw_parts(
+                (*self.raw).to,
+                out * self.channels,
+            ));
+        }
+    }
+}
+
+impl Drop for Resampler {
+    fn drop(&mut self) {
+        unsafe { sys::switch_resample_destroy(&mut self.raw) };
     }
 }

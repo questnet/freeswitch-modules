@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["freeswitch", "audio_fork", "mod_audio_fork", "fs_tests"]
+members = ["freeswitch", "audio_fork", "mod_audio_fork", "test_server", "fs_tests"]
 # fs_tests needs a running FreeSWITCH, see docs/testing-plan.md#real-fs-tier
-default-members = ["freeswitch", "audio_fork", "mod_audio_fork"]
+default-members = ["freeswitch", "audio_fork", "mod_audio_fork", "test_server"]
 
 [workspace.package]
 edition = "2024"
@@ -12,6 +12,7 @@ publish = false
 [workspace.dependencies]
 freeswitch = { path = "freeswitch" }
 audio_fork = { path = "audio_fork" }
+test_server = { path = "test_server" }
 bindgen = "0.73"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 proptest = "1.12"

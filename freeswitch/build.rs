@@ -51,6 +51,10 @@ const TYPES: &[&str] = &[
     "switch_frame_t",
     "switch_codec_implementation_t",
     "switch_audio_resampler_t",
+    "switch_media_bug_flag_enum_t",
+    "switch_channel_flag_t",
+    "switch_event_types_t",
+    "switch_stack_t",
 ];
 
 const VARS: &[&str] = &[

@@ -10,12 +10,16 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     process::Stdio,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
-use freeswitch_esl_tokio::{EslClient, EslEventStream};
+use freeswitch_esl_tokio::{EslClient, EslEventStream, EventFormat};
 use futures_util::FutureExt;
-use tokio::process::{Child, Command};
+use tokio::{
+    process::{Child, Command},
+    sync::Notify,
+};
 
 /// Which build of the module a run loads (differential tests, T4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +71,9 @@ impl Layout {
 pub struct FreeSwitch {
     pub variant: Variant,
     pub client: EslClient,
-    pub events: EslEventStream,
+    events: Arc<Events>,
+    /// Holds the generated audio files.
+    files: PathBuf,
     child: Child,
     log_file: PathBuf,
     // kept alive for the lifetime of the process, removed on drop
@@ -141,11 +147,27 @@ impl FreeSwitch {
             .kill_on_drop(true);
         let mut child = cmd.spawn().expect("spawning freeswitch");
 
-        let (client, events) = connect_esl(&mut child).await;
+        let files = base.0.join("storage");
+        for rate in [8000, 16000] {
+            fs::write(
+                files.join(format!("counter.r{}", rate / 1000)),
+                counter_file(rate),
+            )
+            .unwrap();
+        }
+        let (client, stream) = connect_esl(&mut child).await;
+        let subclasses = SUBCLASSES.join(" ");
+        client
+            .subscribe_events_raw(EventFormat::Plain, &format!("CUSTOM {subclasses}"))
+            .await
+            .unwrap();
+        let events = Arc::new(Events::default());
+        tokio::spawn(collect(stream, events.clone()));
         let fs = FreeSwitch {
             variant,
             client,
             events,
+            files,
             child,
             log_file,
             _base: base,
@@ -179,12 +201,57 @@ impl FreeSwitch {
 
     /// Originates a loopback pair with L16 at `rate`; leg B answers and parks, leg A parks.
     pub async fn call(&self, rate: u32) -> Call<'_> {
-        let uuid = self.api("create_uuid").await.trim().to_string();
+        let a = self.api("create_uuid").await.trim().to_string();
+        // mod_loopback reads this before originate sets the channel's variables, so only a global one counts
+        self.api_ok(&format!("global_setvar loopback_initial_codec=L16@{rate}h"))
+            .await;
         self.api_ok(&format!(
-            "originate {{origination_uuid={uuid},loopback_initial_codec=L16@{rate}h}}loopback/answer/default &park"
+            "originate {{origination_uuid={a}}}loopback/answer/default &park"
         ))
         .await;
-        Call { fs: self, a: uuid }
+        let b = self
+            .api(&format!("uuid_getvar {a} other_loopback_leg_uuid"))
+            .await
+            .trim()
+            .to_string();
+        Call {
+            fs: self,
+            a,
+            b,
+            rate,
+        }
+    }
+
+    /// Waits for an event of a fork; every wait is bounded.
+    pub async fn event(&self, session: &str, bugname: &str, subclass: &str) -> FsEvent {
+        let wanted =
+            |e: &FsEvent| e.session == session && e.bugname == bugname && e.subclass == subclass;
+        let wait = async {
+            loop {
+                let fired = self.events.fired.notified();
+                if let Some(e) = self.events.all().into_iter().find(wanted) {
+                    return e;
+                }
+                fired.await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), wait)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "no {subclass} for {session}/{bugname}; got {:?}",
+                    self.events_of(session)
+                )
+            })
+    }
+
+    /// The events of one session so far.
+    pub fn events_of(&self, session: &str) -> Vec<FsEvent> {
+        self.events
+            .all()
+            .into_iter()
+            .filter(|e| e.session == session)
+            .collect()
     }
 
     /// Shuts FreeSWITCH down and fails if it crashed or logged a CRIT line.
@@ -223,9 +290,52 @@ pub struct Call<'a> {
     fs: &'a FreeSwitch,
     /// The leg the fork is attached to.
     pub a: String,
+    /// The other leg: what it plays, leg A reads.
+    pub b: String,
+    pub rate: u32,
 }
 
 impl Call<'_> {
+    /// `uuid_audio_fork <a> <args>`, which must succeed.
+    pub async fn fork(&self, args: &str) {
+        self.fs
+            .api_ok(&format!("uuid_audio_fork {} {args}", self.a))
+            .await;
+    }
+
+    /// Leg B plays a running sample counter starting at 1 (see [`audio::assert_counter`]).
+    pub async fn play_counter(&self) {
+        let file = self.fs.files.join(format!("counter.r{}", self.rate / 1000));
+        self.fs
+            .api_ok(&format!(
+                "uuid_broadcast {} {} aleg",
+                self.b,
+                file.display()
+            ))
+            .await;
+    }
+
+    /// Leg A plays digital silence, so its write stream has frames: a bug that captures both
+    /// streams delivers nothing while either one is empty.
+    pub async fn play_silence_to_a(&self) {
+        self.fs
+            .api_ok(&format!(
+                "uuid_broadcast {} silence_stream://-1,0 aleg",
+                self.a
+            ))
+            .await;
+    }
+
+    /// Leg B plays a sine tone.
+    pub async fn play_tone(&self, hz: u32) {
+        self.fs
+            .api_ok(&format!(
+                "uuid_broadcast {} tone_stream://%(60000,0,{hz}) aleg",
+                self.b
+            ))
+            .await;
+    }
+
     /// The media bugs on leg A, as `uuid_buglist` prints them.
     pub async fn bugs(&self) -> String {
         self.fs.api(&format!("uuid_buglist {}", self.a)).await
@@ -233,6 +343,128 @@ impl Call<'_> {
 
     pub async fn hangup(self) {
         self.fs.api_ok(&format!("uuid_kill {}", self.a)).await;
+    }
+}
+
+/// A `mod_audio_fork::*` event as received over ESL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FsEvent {
+    pub subclass: String,
+    pub bugname: String,
+    /// `Unique-ID`, from the channel data.
+    pub session: String,
+    pub channel_name: Option<String>,
+    pub body: Option<String>,
+}
+
+const SUBCLASSES: [&str; 7] = [
+    "mod_audio_fork::connect",
+    "mod_audio_fork::connect_failed",
+    "mod_audio_fork::disconnect",
+    "mod_audio_fork::error",
+    "mod_audio_fork::json",
+    "mod_audio_fork::kill_audio",
+    "mod_audio_fork::buffer_overrun",
+];
+
+#[derive(Debug, Default)]
+struct Events {
+    received: Mutex<Vec<FsEvent>>,
+    fired: Notify,
+}
+
+impl Events {
+    fn all(&self) -> Vec<FsEvent> {
+        self.received.lock().unwrap().clone()
+    }
+}
+
+async fn collect(mut stream: EslEventStream, events: Arc<Events>) {
+    while let Some(Ok(event)) = stream.recv().await {
+        let header = |name: &str| event.header_str(name).map(str::to_string);
+        let Some(subclass) = header("Event-Subclass") else {
+            continue;
+        };
+        events.received.lock().unwrap().push(FsEvent {
+            subclass,
+            bugname: header("Audio-Fork-Bugname").unwrap_or_default(),
+            session: header("Unique-ID").unwrap_or_default(),
+            channel_name: header("Channel-Name"),
+            body: event.body().map(str::to_string),
+        });
+        events.fired.notify_waiters();
+    }
+}
+
+/// 60 s of a running 16 bit counter starting at 1, as raw little-endian L16.
+fn counter_file(rate: u32) -> Vec<u8> {
+    (1..=rate * 60)
+        .flat_map(|i| (i as u16).to_le_bytes())
+        .collect()
+}
+
+/// Checks on received audio.
+pub mod audio {
+    /// Little-endian L16 bytes as samples.
+    pub fn samples(bytes: &[u8]) -> Vec<i16> {
+        bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|s| i16::from_le_bytes(*s))
+            .collect()
+    }
+
+    /// One channel of interleaved audio.
+    pub fn channel(samples: &[i16], channels: usize, index: usize) -> Vec<i16> {
+        samples
+            .iter()
+            .skip(index)
+            .step_by(channels)
+            .copied()
+            .collect()
+    }
+
+    /// From where the counter starts, every sample is one more than the one before: nothing was
+    /// dropped, repeated or reordered. Samples of -1 are skipped: that is FreeSWITCH's silence
+    /// before playback and the comfort-noise frames mod_loopback inserts when the other leg is a
+    /// little late (the counter only reaches -1 after 65535 samples). Returns how many counter
+    /// samples there were.
+    pub fn assert_counter(samples: &[i16]) -> usize {
+        let consecutive = |w: &[i16]| w.windows(2).all(|p| p[1] == p[0].wrapping_add(1));
+        let start = samples
+            .windows(16)
+            .position(consecutive)
+            .unwrap_or_else(|| {
+                let head = &samples[..samples.len().min(32)];
+                panic!("no counter in {} samples, starting {head:?}", samples.len())
+            });
+        let counter: Vec<i16> = samples[start..]
+            .iter()
+            .copied()
+            .filter(|&s| s != -1)
+            .collect();
+        for (i, pair) in counter.windows(2).enumerate() {
+            let around = &counter[i.saturating_sub(10)..(i + 30).min(counter.len())];
+            assert_eq!(
+                pair[1],
+                pair[0].wrapping_add(1),
+                "gap after counter sample {i} of {}: {around:?}",
+                counter.len()
+            );
+        }
+        counter.len()
+    }
+
+    /// The dominant frequency, from the zero crossings after the leading silence.
+    pub fn frequency(samples: &[i16], rate: u32) -> f64 {
+        let start = samples
+            .iter()
+            .position(|&s| s.unsigned_abs() > 1000)
+            .expect("only silence");
+        let tone = &samples[start..];
+        let crossings = tone.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count();
+        crossings as f64 / 2.0 / (tone.len() as f64 / rate as f64)
     }
 }
 

@@ -1,11 +1,18 @@
 //! Real-FreeSWITCH scenarios (docs/testing-plan.md#scenarios). Run in the fs-test image by `just test-fs`.
 
-use fs_tests::{Exception, FreeSwitch, Scenario};
+use fs_tests::{
+    Exception, FreeSwitch, Scenario,
+    audio::{assert_counter, channel, frequency, samples},
+};
+use test_server::{Frame, Server};
 
 fn main() {
     let scenarios: &[(&str, Scenario)] = &[
         ("load_lifecycle", |fs| Box::pin(load_lifecycle(fs))),
         ("start_rejections", |fs| Box::pin(start_rejections(fs))),
+        ("capture", |fs| Box::pin(capture(fs))),
+        ("two_forks", |fs| Box::pin(two_forks(fs))),
+        ("events", |fs| Box::pin(events(fs))),
     ];
     fs_tests::run(scenarios);
 }
@@ -55,7 +62,131 @@ async fn start_rejections(fs: &FreeSwitch) {
         .api(&format!("uuid_audio_fork {} pause rej", call.a))
         .await;
     assert!(reply.starts_with("-ERR"), "unsupported subcommand: {reply}");
+    let big = format!("{{\"m\":\"{}\"}}", "x".repeat(1024 * 1024));
+    let reply = fs
+        .api(&format!(
+            "uuid_audio_fork {} start {url} mono 8k rej {big}",
+            call.a
+        ))
+        .await;
+    assert!(reply.starts_with("-ERR"), "metadata over 1 MB: {reply}");
     let bugs = call.bugs().await;
     assert!(!bugs.contains("rej"), "bugs left: {bugs}");
+
+    call.fork(&format!("start {url} mono 8k dup")).await;
+    let reply = fs
+        .api(&format!(
+            "uuid_audio_fork {} start {url} mono 8k dup",
+            call.a
+        ))
+        .await;
+    assert!(reply.starts_with("-ERR"), "duplicate bugname: {reply}");
+    call.fork("stop dup").await;
+    let reply = fs
+        .api(&format!("uuid_audio_fork {} stop dup", call.a))
+        .await;
+    assert!(reply.starts_with("-ERR"), "stop after stop: {reply}");
+    call.hangup().await;
+}
+
+/// Every mix at both codec and target rates: the counter arrives gapless where nothing is
+/// resampled, the tone keeps its frequency where it is.
+async fn capture(fs: &FreeSwitch) {
+    for codec in [8000, 16000] {
+        for rate in [8000, 16000] {
+            for mix in ["mono", "mixed", "stereo"] {
+                let what = format!("{mix} {codec} Hz -> {rate} Hz");
+                println!("  {what}");
+                let mut server = Server::start().await;
+                let call = fs.call(codec).await;
+                call.fork(&format!("start {} {mix} {rate} cap", server.url("/")))
+                    .await;
+                let mut conn = server.accept().await;
+                let channels = if mix == "stereo" { 2 } else { 1 };
+                if mix != "mono" {
+                    call.play_silence_to_a().await;
+                }
+                if codec == rate {
+                    call.play_counter().await;
+                } else {
+                    call.play_tone(1000).await;
+                }
+                let audio = samples(&conn.audio(rate as usize * channels * 2).await);
+                let read = channel(&audio, channels, 0);
+                if codec == rate {
+                    let n = assert_counter(&read);
+                    assert!(n > rate as usize / 4, "{what}: only {n} counter samples");
+                } else {
+                    let hz = frequency(&read, rate);
+                    assert!((950.0..1050.0).contains(&hz), "{what}: tone at {hz} Hz");
+                }
+                call.fork("stop cap").await;
+                call.hangup().await;
+            }
+        }
+    }
+}
+
+/// Two bugnames on one call stream independently; stopping one leaves the other.
+async fn two_forks(fs: &FreeSwitch) {
+    let mut server = Server::start().await;
+    let call = fs.call(8000).await;
+    call.fork(&format!("start {} mono 8k one", server.url("/one")))
+        .await;
+    let mut one = server.accept().await;
+    call.fork(&format!("start {} mono 8k two", server.url("/two")))
+        .await;
+    let mut two = server.accept().await;
+    call.play_counter().await;
+    assert_counter(&samples(&one.audio(8000).await));
+    assert_counter(&samples(&two.audio(8000).await));
+    call.fork("stop one").await;
+    loop {
+        match one.next().await {
+            Some(Frame::Binary(_)) => {}
+            Some(Frame::Close) | None => break,
+            Some(other) => panic!("after stop: {other:?}"),
+        }
+    }
+    let after = samples(&two.audio(8000).await);
+    assert!(
+        after.iter().all(|&s| s != 0),
+        "second fork stalled after the first stopped"
+    );
+    call.fork("stop two").await;
+    call.hangup().await;
+}
+
+/// connect, disconnect and connect_failed carry the channel data and the bugname.
+async fn events(fs: &FreeSwitch) {
+    let mut server = Server::start().await;
+    let call = fs.call(8000).await;
+    call.fork(&format!("start {} mono 8k ev", server.url("/")))
+        .await;
+    let conn = server.accept().await;
+    let connect = fs.event(&call.a, "ev", "mod_audio_fork::connect").await;
+    assert!(
+        connect.channel_name.is_some(),
+        "no channel data: {connect:?}"
+    );
+    assert_eq!(connect.body, None);
+    conn.drop_tcp();
+    let disconnect = fs.event(&call.a, "ev", "mod_audio_fork::disconnect").await;
+    assert_eq!(disconnect.body, None);
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    call.fork(&format!("start ws://127.0.0.1:{port}/ mono 8k failed"))
+        .await;
+    let failed = fs
+        .event(&call.a, "failed", "mod_audio_fork::connect_failed")
+        .await;
+    let body: serde_json::Value = serde_json::from_str(failed.body.as_deref().unwrap()).unwrap();
+    assert!(body["reason"].is_string(), "{body}");
+    call.fork("stop ev").await;
+    call.fork("stop failed").await;
     call.hangup().await;
 }

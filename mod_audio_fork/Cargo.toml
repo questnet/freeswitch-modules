@@ -12,6 +12,9 @@ crate-type = ["cdylib"]
 [dependencies]
 audio_fork.workspace = true
 freeswitch.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [features]
 # API subcommands that force panics, for the panic containment tests (T9); never in release images

@@ -10,6 +10,8 @@ publish.workspace = true
 freeswitch-esl-tokio = "2.8"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "time", "net"] }
 futures-util.workspace = true
+serde_json.workspace = true
+test_server.workspace = true
 
 [[test]]
 name = "fs"
