@@ -4,6 +4,7 @@
 //! The release thresholds and chunking follow the C module.
 
 use std::collections::VecDeque;
+use std::mem;
 
 use parking_lot::Mutex;
 
@@ -70,7 +71,7 @@ impl Prebuffer {
         self.threshold = LATER_RELEASE * self.factor;
         let whole = self.held.len() / self.factor * self.factor;
         let rest = self.held.split_off(whole);
-        Some(std::mem::replace(&mut self.held, rest))
+        Some(mem::replace(&mut self.held, rest))
     }
 }
 
