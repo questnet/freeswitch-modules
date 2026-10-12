@@ -49,7 +49,7 @@ Numbers as in the review.
 - [x] **1.4 "Queues nothing after CLOSE" has a window** (Low, `Shared::fire`). A CLOSE between the token check and the send lets one event through. Accepted: a new fork with the same bugname fires nothing before its handshake, which takes far longer. Documented at `Shared::fire`.
 - [ ] **1.5 The media thread locks `State` for every frame** (Low, `fork.rs` `on_read`). The critical sections are short and never span a call into the host, but parking_lot has no priority inheritance. Check with `just test-load` against the last numbers (1.00 % CPU per call, no overruns).
 - [ ] **2.1, 2.2 Comments**: the fix noted for 1.4 of the previous review (token cancelled under the lock) is superseded by the event queue; `docs/rust-rebuild-plan.md` still describes an outdated `MediaSide`.
-- [ ] **3.2 Absence checks without a pause** (`audio_fork/tests/simulation.rs`, `refused_connect_fires_connect_failed_once` and `stop_sends_the_final_text_before_closing`): with queued events, a wrongly queued extra event can reach the fake host only after the assertion.
+- [x] **3.2 Absence checks without a pause** (`audio_fork/tests/simulation.rs`, `refused_connect_fires_connect_failed_once` and `stop_sends_the_final_text_before_closing`): with queued events, a wrongly queued extra event can reach the fake host only after the assertion. Fixed: both wait 100 ms first, as the neighbouring tests do.
 
 ## Compatibility notes (intentional, D1 and D13)
 

@@ -86,6 +86,8 @@ async fn refused_connect_fires_connect_failed_once() {
         media.on_read(&FRAME);
     }
     assert_eq!(handle.send_text("x".to_string()), Err(TextError::NotOpen));
+    // events are fired from a queue, so a second one would only arrive later
+    time::sleep(Duration::from_millis(100)).await;
     assert_eq!(host.events().len(), 1);
     media.on_close();
 }
@@ -174,6 +176,7 @@ async fn stop_sends_the_final_text_before_closing() {
     assert_eq!(conn.next_text().await, Some("{\"final\":true}".to_string()));
     assert_eq!(conn.next().await, Some(Frame::Close));
     assert_eq!(conn.next().await, None);
+    time::sleep(Duration::from_millis(100)).await;
     assert_eq!(host.events(), vec![Event::Connect]);
 }
 
