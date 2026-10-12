@@ -1,0 +1,36 @@
+[package]
+name = "audio_fork"
+description = "mod_audio_fork core: argument parsing, the socket task and the media side, without FreeSWITCH"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# no lock poisoning: a contained panic must not disable every other fork (D4)
+parking_lot.workspace = true
+futures-util.workspace = true
+rtrb.workspace = true
+# ring as the one crypto provider, which rustls then installs by itself for wss:// (D9)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+serde_json.workspace = true
+# TCP keepalive on the WebSocket's connection, which tokio's TcpStream cannot set
+socket2 = "0.6"
+tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[features]
+# injected panics for the containment tests (T9); never in release images
+test-hooks = []
+
+[[test]]
+name = "panics"
+required-features = ["test-hooks"]
+
+[dev-dependencies]
+test_server.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+proptest.workspace = true

@@ -1,21 +1,28 @@
 # freeswitch-modules
 
-The `mod_audio_fork` Freeswitch module, intended for use with a [jambonz](https://jambonz.org) programmable voice platform deployment.
+The `mod_audio_fork` FreeSWITCH module, intended for use with a [jambonz](https://jambonz.org) programmable voice platform deployment. It is written in Rust; the interface is described in [mod_audio_fork/README.md](mod_audio_fork/README.md).
+
+| Crate | Role |
+| --- | --- |
+| `audio_fork` | The core: argument parsing, the socket task, capture and playout; no FreeSWITCH dependency |
+| `freeswitch` | Bindings to the FreeSWITCH functions the module calls (generated at build time) and a thin safe layer |
+| `mod_audio_fork` | The module itself (`cdylib`): FreeSWITCH callbacks, the runtime and the registry of forks |
+| `test_server` | Scripted WebSocket server for the tests |
+| `fs_tests` | Scenarios and the load test against a real FreeSWITCH |
 
 ## Development
 
-Tasks are run with [just](https://github.com/casey/just). Building and testing need Docker; IDE setup needs `git`, `cmake`, and (on macOS) Homebrew.
+Tasks are run with [just](https://github.com/casey/just). Building and testing need Docker; IDE setup needs `git`.
 
 | Target | Description |
 | --- | --- |
-| `just` / `just test` | Compile all sources against FreeSWITCH/libwebsockets headers and run the unit tests (native arch, scalar vector math) |
-| `just test-sse2` | Same, on linux/amd64 with SSE2 vector math (emulated on arm hosts) |
-| `just test-all` | Run both configurations |
+| `just` / `just test` | `cargo fmt --check`, `clippy`, unit and simulation tests, and the release build of `mod_audio_fork.so` |
+| `just test-fs [filter]` | Scenarios against a real FreeSWITCH 1.11.3 over ESL, and the panic scenarios against the `test-hooks` build |
+| `just test-load [n]` | `n` calls (default 20) with bidirectional audio for 60 s: CPU per call, buffer overruns, playout delay |
 | `just prereqs` | Check that Docker is installed and running |
 | `just rebuild` | Rebuild from scratch, ignoring the Docker cache |
-| `just try-versions <fs> <lws>` | Build against other versions, e.g. `just try-versions v1.11.3 v5.0.0` |
-| `just shell` | Interactive shell in the built image |
-| `just ide-setup` | Fetch FreeSWITCH/libwebsockets headers into `.deps/` and generate `.clangd` and `.vscode/c_cpp_properties.json` for IDE support. Needs `brew install boost speexdsp` on macOS |
+| `just shell` | Interactive shell in the fs-test image |
+| `just ide-setup` | Fetch the FreeSWITCH headers into `.deps/` and write a local `.cargo/config.toml` so rust-analyzer can build the bindings |
 | `just clean` | Remove the Docker images created by the justfile |
 
 ## Licensing

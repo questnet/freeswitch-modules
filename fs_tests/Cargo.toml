@@ -1,0 +1,22 @@
+[package]
+name = "fs_tests"
+description = "Tests of mod_audio_fork against a real FreeSWITCH, driven over ESL"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+freeswitch-esl-tokio = "2.8"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "time", "net"] }
+futures-util.workspace = true
+serde_json.workspace = true
+test_server.workspace = true
+
+[[test]]
+name = "fs"
+harness = false
+
+[[test]]
+name = "load"
+harness = false

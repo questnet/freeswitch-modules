@@ -1,56 +1,72 @@
-# Compile-only check of mod_audio_fork against FreeSWITCH headers and libwebsockets,
-# plus standalone unit tests. Nothing is linked against libfreeswitch.
-#   docker build .
-#   docker build --platform linux/amd64 --build-arg SIMD=sse2 .
-FROM debian:trixie-slim
+# Test image for mod_audio_fork, see docs/testing-plan.md#image.
+#   just test      (stage rust: fmt, clippy, unit and simulation tests, release build)
+#   just test-fs   (stage fs-test: real FreeSWITCH driven over ESL)
+
+# FreeSWITCH with only the modules the tests need
+FROM debian:trixie-slim AS fs-build
 
 ARG FS_VERSION=v1.11.3
-ARG LWS_VERSION=v5.0.0
-ARG SIMD=none
+ARG SOFIA_VERSION=v1.13.18
+ARG SPANDSP_VERSION=v3.1.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential cmake pkg-config git ca-certificates \
-      libboost-dev libspeexdsp-dev zlib1g-dev \
-      libssl-dev libcurl4-openssl-dev libpcre2-dev libsqlite3-dev libedit-dev libldns-dev \
+      build-essential autoconf automake libtool libtool-bin pkg-config git ca-certificates cmake \
+      zlib1g-dev libssl-dev libcurl4-openssl-dev libpcre2-dev libsqlite3-dev libedit-dev libldns-dev \
+      libspeex-dev libspeexdsp-dev libsndfile1-dev libtiff-dev libjpeg-dev uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# FreeSWITCH: headers only
+# FreeSWITCH needs newer spandsp and sofia-sip than Debian ships
+RUN git clone --depth 1 --branch ${SPANDSP_VERSION} https://github.com/freeswitch/spandsp.git /src/spandsp \
+    && cd /src/spandsp \
+    && ./bootstrap.sh && ./configure --prefix=/usr/local && make -j"$(nproc)" && make install
+RUN git clone --depth 1 --branch ${SOFIA_VERSION} https://github.com/freeswitch/sofia-sip.git /src/sofia-sip \
+    && cd /src/sofia-sip && ./bootstrap.sh && ./configure --prefix=/usr/local && make -j"$(nproc)" && make install \
+    && ldconfig
+
 RUN git clone --depth 1 --branch ${FS_VERSION} https://github.com/signalwire/freeswitch.git /src/freeswitch
+COPY tests/modules.conf /src/freeswitch/modules.conf
+RUN cd /src/freeswitch && ./bootstrap.sh -j \
+    && ./configure --prefix=/usr/local/freeswitch --disable-libvpx --disable-libyuv --without-pgsql \
+    && make -j"$(nproc)" && make install \
+    && ldconfig
+RUN echo /usr/local/freeswitch/lib > /etc/ld.so.conf.d/freeswitch.conf && ldconfig
+ENV PATH=/usr/local/freeswitch/bin:$PATH
 
-# libwebsockets: minimal build, no TLS
-RUN git clone --depth 1 --branch ${LWS_VERSION} https://github.com/warmcat/libwebsockets.git /src/lws \
-    && cmake -S /src/lws -B /src/lws/build \
-         -DCMAKE_BUILD_TYPE=Release -DLWS_WITH_SSL=OFF \
-         -DLWS_WITHOUT_TESTAPPS=ON -DLWS_WITHOUT_TEST_SERVER=ON \
-         -DLWS_WITHOUT_TEST_SERVER_EXTPOLL=ON -DLWS_WITHOUT_TEST_PING=ON \
-         -DLWS_WITHOUT_TEST_CLIENT=ON -DLWS_WITH_MINIMAL_EXAMPLES=OFF \
-    && cmake --build /src/lws/build -j"$(nproc)" \
-    && cmake --install /src/lws/build
-
-# Generate the build-time headers without running configure (LP64 values)
-RUN cd /src/freeswitch/src/include \
-    && sed -e 's/@short_value@/short/' -e 's/@int_value@/int/' -e 's/@long_value@/long/' \
-           -e 's/@size_t_value@/unsigned long/' -e 's/@ssize_t_value@/long/' \
-           -e 's/@voidp_size@/8/' -e 's|@prefix@|/usr/local/freeswitch|' \
-           -e 's/^@[a-z0-9_]*_fmt@$//' switch_am_config.h.in > switch_am_config.h \
-    && sed -E 's/@([A-Z_]+)@/0/g' switch_version.h.template > switch_version.h
-
-COPY mod_audio_fork /work/mod_audio_fork
-WORKDIR /work/mod_audio_fork
-
-ENV FS_INC="-I/src/freeswitch/src/include -I/src/freeswitch/libs/libteletone/src"
-
-# Compile gate (-c only, no link)
-RUN set -eux; \
-    case "$SIMD" in sse2) SIMDFLAGS="-msse2 -DUSE_SSE2";; avx2) SIMDFLAGS="-mavx2 -DUSE_AVX2";; *) SIMDFLAGS="";; esac; \
-    echo "$SIMDFLAGS" > /tmp/simdflags; \
-    mkdir -p /tmp/obj; \
-    gcc -c -Wall $FS_INC $(pkg-config --cflags libwebsockets) mod_audio_fork.c -o /tmp/obj/mod_audio_fork.o; \
-    for f in lws_glue parser audio_pipe vector_math; do \
-      g++ -c -Wall -std=c++17 $SIMDFLAGS $FS_INC $(pkg-config --cflags libwebsockets) $f.cpp -o /tmp/obj/$f.o; \
+# fmt, clippy, unit and simulation tests, release builds (with and without test-hooks)
+FROM fs-build AS rust
+RUN apt-get update && apt-get install -y --no-install-recommends curl clang libclang-dev && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+WORKDIR /work
+COPY rust-toolchain.toml .
+RUN rustup show active-toolchain || rustup toolchain install
+ENV FREESWITCH_INCLUDE_DIR=/usr/local/freeswitch/include/freeswitch FREESWITCH_LIB_DIR=/usr/local/freeswitch/lib
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/work/target set -eux; \
+    cargo fmt --all --check; \
+    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings; \
+    cargo test --locked; \
+    cargo test --locked -p audio_fork --features test-hooks --test panics; \
+    mkdir -p /out/rust /out/rust-hooks; \
+    cargo build --release --locked -p mod_audio_fork; \
+    cp target/release/libmod_audio_fork.so /out/rust/mod_audio_fork.so; \
+    cargo build --release --locked -p mod_audio_fork --features test-hooks; \
+    cp target/release/libmod_audio_fork.so /out/rust-hooks/mod_audio_fork.so; \
+    nm -D --defined-only /out/rust/mod_audio_fork.so | grep -q ' mod_audio_fork_module_interface$'; \
+    for t in fs load; do \
+      exe="$(cargo test --release --locked -p fs_tests --test $t --no-run 2>&1 | sed -n 's/.*Executable .*(\(.*\))$/\1/p')"; \
+      cp "$exe" /out/fs_tests_$t; \
     done
 
-# Unit tests (link only vector_math + base64, no FreeSWITCH)
-RUN set -eux; \
-    g++ -Wall -std=c++17 $(cat /tmp/simdflags) -I. test/test_units.cpp vector_math.cpp -o /tmp/test_units; \
-    /tmp/test_units
+# FreeSWITCH, the module with and without test-hooks, and the test binaries
+FROM fs-build AS fs-test
+COPY --from=rust /out/rust /opt/mod_audio_fork/rust
+COPY --from=rust /out/rust-hooks /opt/mod_audio_fork/rust-hooks
+COPY --from=rust /out/fs_tests_fs /usr/local/bin/fs_tests
+COPY --from=rust /out/fs_tests_load /usr/local/bin/fs_load
+COPY tests/fs-conf /opt/fs-conf
+ENV FREESWITCH_BIN=/usr/local/freeswitch/bin/freeswitch \
+    FREESWITCH_MOD_DIR=/usr/local/freeswitch/lib/freeswitch/mod \
+    AUDIO_FORK_MODULE_DIR=/opt/mod_audio_fork \
+    FS_TEST_CONF=/opt/fs-conf
+CMD ["fs_tests"]

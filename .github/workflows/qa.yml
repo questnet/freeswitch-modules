@@ -17,9 +17,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # the two configurations of `just test-all`: scalar vector math, and SSE2 (runners are linux/amd64)
-        target: [test, test-sse2]
+        target: [test, test-fs]
+    env:
+      # the FreeSWITCH build stage is shared by both targets, so both use one cache scope
+      DOCKER_BUILD_FLAGS: --load --cache-from type=gha,scope=qa --cache-to type=gha,scope=qa,mode=max
     steps:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
+      - uses: docker/setup-buildx-action@v3
+      # exposes the cache service token that `--cache-to type=gha` needs to plain `docker build`
+      - uses: crazy-max/ghaction-github-runtime@v3
       - run: just ${{ matrix.target }}
