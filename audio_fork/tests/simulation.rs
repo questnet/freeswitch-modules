@@ -257,23 +257,6 @@ async fn message_over_the_receive_limit_disconnects() {
     media.close();
 }
 
-fn le_bytes(samples: impl IntoIterator<Item = i16>) -> Vec<u8> {
-    samples.into_iter().flat_map(|s| s.to_le_bytes()).collect()
-}
-
-/// Polls the write-replace side, as the media thread does every 20 ms, until a frame carries audio.
-async fn next_played(media: &mut MediaSide) -> [i16; 160] {
-    for _ in 0..1000 {
-        let mut frame = [0; 160];
-        media.on_write_replace(&mut frame);
-        if frame.iter().any(|&s| s != 0) {
-            return frame;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    panic!("nothing played");
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn binary_without_playout_is_ignored() {
     let mut server = Server::start().await;
@@ -284,6 +267,10 @@ async fn binary_without_playout_is_ignored() {
     conn.send_text(r#"{"type":"json"}"#);
     host.wait_for(|e| matches!(e, Event::Json(_))).await;
     media.close();
+}
+
+fn le_bytes(samples: impl IntoIterator<Item = i16>) -> Vec<u8> {
+    samples.into_iter().flat_map(|s| s.to_le_bytes()).collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -315,13 +302,17 @@ async fn playout_starts_after_the_prebuffer_and_kill_audio_discards_it() {
     media.close();
 }
 
-/// The first sample of the first frame that carries audio.
-async fn first_played(media: &mut MediaSide) -> i16 {
-    next_played(media)
-        .await
-        .into_iter()
-        .find(|&s| s != 0)
-        .unwrap()
+/// Polls the write-replace side, as the media thread does every 20 ms, until a frame carries audio.
+async fn next_played(media: &mut MediaSide) -> [i16; 160] {
+    for _ in 0..1000 {
+        let mut frame = [0; 160];
+        media.on_write_replace(&mut frame);
+        if frame.iter().any(|&s| s != 0) {
+            return frame;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("nothing played");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -341,6 +332,15 @@ async fn audio_sent_right_after_kill_audio_is_played() {
     host.wait_for(|e| matches!(e, Event::Json(_))).await;
     assert_eq!(first_played(&mut media).await, 20001);
     media.close();
+}
+
+/// The first sample of the first frame that carries audio.
+async fn first_played(media: &mut MediaSide) -> i16 {
+    next_played(media)
+        .await
+        .into_iter()
+        .find(|&s| s != 0)
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]

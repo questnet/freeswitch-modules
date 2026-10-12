@@ -105,10 +105,6 @@ mod tests {
 
     use super::*;
 
-    fn bytes(samples: &[i16]) -> Vec<u8> {
-        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
-    }
-
     proptest! {
         /// However the stream is split into frames, the same samples come out in order.
         #[test]
@@ -128,6 +124,10 @@ mod tests {
             out.extend(&prebuffer.held);
             prop_assert_eq!(out, samples);
         }
+    }
+
+    fn bytes(samples: &[i16]) -> Vec<u8> {
+        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
     }
 
     #[test]

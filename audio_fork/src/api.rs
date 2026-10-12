@@ -229,8 +229,17 @@ mod tests {
 
     use super::*;
 
-    fn tokens(s: &[&str]) -> Vec<String> {
-        s.iter().map(|t| t.to_string()).collect()
+    proptest! {
+        // the rarest branches (all ten start tokens valid) come up about once in 200 cases
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #[test]
+        fn parse_follows_the_c_rules(argv in argv()) {
+            let strip = |r: Result<Command, ParseError>| r.map_err(|e| match e {
+                ParseError::Usage(_) => ParseError::Usage(String::new()),
+                other => other,
+            });
+            prop_assert_eq!(strip(parse(&argv)), c_rules(&argv));
+        }
     }
 
     /// The C module's branch structure, transcribed with argv indexing (plus the intended
@@ -344,23 +353,6 @@ mod tests {
         })
     }
 
-    fn one_of(tokens: &'static [&'static str]) -> BoxedStrategy<String> {
-        prop::sample::select(tokens)
-            .prop_map(str::to_string)
-            .boxed()
-    }
-
-    /// One vocabulary per position.
-    fn positions(
-        vocabularies: &[&'static [&'static str]],
-        lengths: std::ops::RangeInclusive<usize>,
-    ) -> BoxedStrategy<Vec<String>> {
-        let positions: Vec<_> = vocabularies.iter().map(|v| one_of(v)).collect();
-        lengths
-            .prop_flat_map(move |n| positions[..n].to_vec())
-            .boxed()
-    }
-
     /// Mostly well-formed commands of each shape, so that every branch comes up often, plus junk.
     fn argv() -> impl Strategy<Value = Vec<String>> {
         let start = positions(
@@ -413,17 +405,21 @@ mod tests {
         prop_oneof![start, text, junk]
     }
 
-    proptest! {
-        // the rarest branches (all ten start tokens valid) come up about once in 200 cases
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
-        #[test]
-        fn parse_follows_the_c_rules(argv in argv()) {
-            let strip = |r: Result<Command, ParseError>| r.map_err(|e| match e {
-                ParseError::Usage(_) => ParseError::Usage(String::new()),
-                other => other,
-            });
-            prop_assert_eq!(strip(parse(&argv)), c_rules(&argv));
-        }
+    /// One vocabulary per position.
+    fn positions(
+        vocabularies: &[&'static [&'static str]],
+        lengths: std::ops::RangeInclusive<usize>,
+    ) -> BoxedStrategy<Vec<String>> {
+        let positions: Vec<_> = vocabularies.iter().map(|v| one_of(v)).collect();
+        lengths
+            .prop_flat_map(move |n| positions[..n].to_vec())
+            .boxed()
+    }
+
+    fn one_of(tokens: &'static [&'static str]) -> BoxedStrategy<String> {
+        prop::sample::select(tokens)
+            .prop_map(str::to_string)
+            .boxed()
     }
 
     #[test]
@@ -436,6 +432,10 @@ mod tests {
             panic!()
         };
         assert_eq!(start.playout, None);
+    }
+
+    fn tokens(s: &[&str]) -> Vec<String> {
+        s.iter().map(|t| t.to_string()).collect()
     }
 
     #[test]

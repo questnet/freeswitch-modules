@@ -257,16 +257,6 @@ async fn receive_limit(fs: &FreeSwitch) {
     call.hangup().await;
 }
 
-/// Streams `seconds` of the running counter (from 1) in frames that split samples.
-fn send_counter(conn: &test_server::Conn, rate: u32, seconds: u32) {
-    let bytes: Vec<u8> = (1..=rate * seconds)
-        .flat_map(|i| (i as i16).to_le_bytes())
-        .collect();
-    for chunk in bytes.chunks(333) {
-        conn.send_binary(chunk.to_vec());
-    }
-}
-
 /// Server audio is played to the caller unchanged (no resampling at matching rates).
 async fn bidi_playout(fs: &FreeSwitch) {
     for rate in [8000, 16000] {
@@ -290,6 +280,16 @@ async fn bidi_playout(fs: &FreeSwitch) {
         );
         call.fork("stop pb").await;
         call.hangup().await;
+    }
+}
+
+/// Streams `seconds` of the running counter (from 1) in frames that split samples.
+fn send_counter(conn: &test_server::Conn, rate: u32, seconds: u32) {
+    let bytes: Vec<u8> = (1..=rate * seconds)
+        .flat_map(|i| (i as i16).to_le_bytes())
+        .collect();
+    for chunk in bytes.chunks(333) {
+        conn.send_binary(chunk.to_vec());
     }
 }
 
@@ -377,21 +377,6 @@ async fn playback_mode(fs: &FreeSwitch) {
     call.hangup().await;
 }
 
-/// Waits until the server has no connection left open.
-async fn all_closed(sink: &Sink) {
-    for _ in 0..150 {
-        if sink.open() == 0 {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!(
-        "{} of {} connections left open",
-        sink.open(),
-        sink.accepted()
-    );
-}
-
 /// Hangup during the connect, during streaming, and a stop racing the hangup, 200 times each:
 /// FreeSWITCH stays up and no socket is left open.
 async fn hangup_races(fs: &FreeSwitch) {
@@ -429,6 +414,21 @@ async fn hangup_races(fs: &FreeSwitch) {
     all_closed(&slow).await;
     all_closed(&sink).await;
     assert!(sink.accepted() > 0);
+}
+
+/// Waits until the server has no connection left open.
+async fn all_closed(sink: &Sink) {
+    for _ in 0..150 {
+        if sink.open() == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!(
+        "{} of {} connections left open",
+        sink.open(),
+        sink.accepted()
+    );
 }
 
 /// Unloading with live forks removes their bugs and closes their sockets; the calls survive.

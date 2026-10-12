@@ -221,10 +221,6 @@ impl Session {
         self.0
     }
 
-    fn channel(&self) -> *mut sys::switch_channel_t {
-        unsafe { sys::switch_core_session_get_channel(self.0) }
-    }
-
     pub fn pre_answer(&self) -> bool {
         unsafe {
             sys::switch_channel_perform_pre_answer(
@@ -234,6 +230,10 @@ impl Session {
                 0,
             ) == STATUS_SUCCESS
         }
+    }
+
+    fn channel(&self) -> *mut sys::switch_channel_t {
+        unsafe { sys::switch_core_session_get_channel(self.0) }
     }
 
     /// The rate of the read codec; `None` while the channel has no media set up.
