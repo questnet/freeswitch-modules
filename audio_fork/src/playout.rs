@@ -1,13 +1,18 @@
 //! Server audio played to the caller (bidirectional audio): the socket task turns inbound binary
 //! frames into samples ([`Prebuffer`]), the media thread mixes them into outgoing frames ([`Playout`]).
 //!
-//! The thresholds and chunking follow the C module's formula: a release needs `320 * factor * 4`
-//! samples at the server's rate the first time and `320 * factor * 2` after that, where `factor`
-//! is how many server samples make one codec sample.
+//! The release thresholds and chunking follow the C module.
 
 use std::collections::VecDeque;
 
 use parking_lot::Mutex;
+
+/// Held before the first release, so playout does not start on a few samples and then run dry between
+/// network chunks: 160 ms at an 8 kHz codec, 80 ms at 16 kHz, as in the C module.
+const FIRST_RELEASE: usize = 320 * 4;
+/// Held before each later release: the playout buffer still holds audio, so a smaller batch keeps it
+/// filled with less delay.
+const LATER_RELEASE: usize = 320 * 2;
 
 /// Inbound L16 bytes collected until there is enough to release.
 #[derive(Debug)]
@@ -15,7 +20,9 @@ pub struct Prebuffer {
     held: Vec<i16>,
     /// A frame can end in the middle of a sample; its first byte waits for the next frame.
     set_aside: Option<u8>,
+    /// Server samples needed for a release: a release constant in codec samples, times `factor`.
     threshold: usize,
+    /// Server samples per codec sample when the server sends at a higher rate, otherwise 1.
     factor: usize,
 }
 
@@ -29,7 +36,7 @@ impl Prebuffer {
         Prebuffer {
             held: Vec::new(),
             set_aside: None,
-            threshold: 320 * factor * 4,
+            threshold: FIRST_RELEASE * factor,
             factor,
         }
     }
@@ -60,7 +67,7 @@ impl Prebuffer {
         if self.held.len() < self.threshold {
             return None;
         }
-        self.threshold = 320 * self.factor * 2;
+        self.threshold = LATER_RELEASE * self.factor;
         let whole = self.held.len() / self.factor * self.factor;
         let rest = self.held.split_off(whole);
         Some(std::mem::replace(&mut self.held, rest))
