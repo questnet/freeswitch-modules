@@ -186,10 +186,12 @@ async fn stream(
 
 /// A send that gives up at CLOSE, so a stalled server cannot keep the fork alive.
 async fn send(socket: &mut Socket, shared: &Shared, message: Message) -> Result<(), End> {
+    // the send first: a text already taken off the queue must not be lost to a CLOSE that came
+    // meanwhile; the token only ends a send that stalls
     tokio::select! {
         biased;
-        _ = shared.closed.cancelled() => Err(End::Closed),
         sent = socket.send(message) => sent.map_err(|e| End::Dropped(e.to_string())),
+        _ = shared.closed.cancelled() => Err(End::Closed),
     }
 }
 
