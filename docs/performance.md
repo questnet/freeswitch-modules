@@ -31,6 +31,19 @@ Every run: 0 buffer overruns, 100 of 100 calls played, playout delay p50 and p90
 
 The difference, 0.29 percentage points per call, is FreeSWITCH's whole CPU per call; the modules' own share of it was not measured (that would need a baseline run with the same calls and no fork).
 
+### Rust after the event queue
+
+Rust module at `cd8927a`: events of all forks go through one bounded queue fired by one task, and the media thread takes the fork's state lock for every frame (review 2, finding 1.5). Same image and setup, 3 runs of 100 calls.
+
+| Run | Rust, CPU per call |
+|---|---|
+| 1 | 1.09 % |
+| 2 | 1.04 % |
+| 3 | 1.00 % |
+| **mean ± sd** | **1.04 ± 0.05 %** |
+
+Every run: 0 buffer overruns, 100 of 100 calls played, playout delay p50 and p90 199 ms, max 219 ms. Within 0.04 points of the earlier mean, and every run below the C module's lowest; no regression.
+
 ### First measurement, C unoptimised (superseded)
 
 During rebuild step 9 the test image built the C module without optimisation (`gcc`/`g++` with no `-O` flag, i.e. `-O0`; `Dockerfile` at `1a46b3e`, lines 53–57), so these overstate the gap. One run each.
