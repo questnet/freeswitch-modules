@@ -80,7 +80,7 @@ All are `CUSTOM` events, carry the channel's data and an `Audio-Fork-Bugname` he
 | `mod_audio_fork::kill_audio` | the server's `killAudio` | none |
 | `mod_audio_fork::buffer_overrun` | capture audio was dropped, once per fork | none |
 
-No event fires for a fork after it was stopped or its call hung up.
+A fork queues no event once it was stopped or its call hung up; one queued just before can still arrive after the `stop` reply, as events are delivered asynchronously anyway.
 
 ## Failure behaviour
 

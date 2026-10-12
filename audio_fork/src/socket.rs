@@ -57,8 +57,8 @@ pub(crate) async fn run(
     };
     let mut socket = match connected {
         Ok(Ok(socket)) => socket,
-        Ok(Err(e)) => return connect_failed(&shared, &*host, e.to_string()),
-        Err(_) => return connect_failed(&shared, &*host, "connect timed out".to_string()),
+        Ok(Err(e)) => return connect_failed(&shared, e.to_string()),
+        Err(_) => return connect_failed(&shared, "connect timed out".to_string()),
     };
     if shared.closed.is_cancelled() {
         // closed just as the handshake completed: nothing is sent, not even the queued texts
@@ -70,7 +70,7 @@ pub(crate) async fn run(
     shared.state.lock().phase = Phase::Open;
     shared.streaming.store(true, Ordering::Release);
     tracing::info!(session = %id.session, "{id}: connected to {}", config.url);
-    shared.fire(&*host, Event::Connect);
+    shared.fire(Event::Connect);
 
     let end = stream(&mut socket, &shared, &*host, &mut capture, &mut inbound).await;
     shared.streaming.store(false, Ordering::Release);
@@ -90,7 +90,7 @@ pub(crate) async fn run(
         End::Dropped(reason) => {
             shared.state.lock().phase = Phase::Ended;
             tracing::info!(session = %id.session, "{id}: connection dropped: {reason}");
-            shared.fire(&*host, Event::Disconnect(None));
+            shared.fire(Event::Disconnect(None));
         }
     }
 }
@@ -131,11 +131,11 @@ fn tls() -> Connector {
     Connector::Rustls(config.clone())
 }
 
-fn connect_failed(shared: &Shared, host: &dyn Host, reason: String) {
+fn connect_failed(shared: &Shared, reason: String) {
     let id = &shared.id;
     shared.state.lock().phase = Phase::Ended;
     tracing::info!(session = %id.session, "{id}: connection failed: {reason}");
-    shared.fire(host, Event::ConnectFailed { reason });
+    shared.fire(Event::ConnectFailed { reason });
 }
 
 /// Sends texts (in order, before any audio queued after them) and capture audio until CLOSE or the connection ends.
@@ -199,9 +199,9 @@ fn receive(shared: &Shared, host: &dyn Host, inbound: &mut Option<Inbound>, mess
     let id = &shared.id;
     match message {
         Message::Text(text) => match parse(&text) {
-            Request::Fire(event) => shared.fire(host, event),
+            Request::Fire(event) => shared.fire(event),
             Request::KillAudio => {
-                shared.fire(host, Event::KillAudio);
+                shared.fire(Event::KillAudio);
                 host.break_playback(&id.session);
                 if let (Some(inbound), Some(playout)) = (inbound, &shared.playout) {
                     inbound.prebuffer.reset();

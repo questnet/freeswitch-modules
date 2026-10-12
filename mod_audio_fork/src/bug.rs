@@ -42,10 +42,11 @@ pub unsafe extern "C" fn callback(
         }
         ABC_CLOSE => {
             // CLOSE runs exactly once, after every other callback: the user data is reclaimed here only
-            let data = unsafe { Box::from_raw(data) };
-            crate::closed(&data.id, data.serial);
-            tracing::info!(session = %data.id.session, "{}: bug closed", data.id);
-            data.media.close();
+            let BugData { media, id, serial } = *unsafe { Box::from_raw(data) };
+            // the fork stops queueing events before a new fork with this bugname can start
+            media.close();
+            crate::closed(&id, serial);
+            tracing::info!(session = %id.session, "{id}: bug closed");
             TRUE
         }
         _ => TRUE,

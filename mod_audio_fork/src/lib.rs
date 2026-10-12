@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use audio_fork::api::{self, Action, Mix, ParseError, Start};
+use audio_fork::events::EventQueue;
 use audio_fork::fork::{
     Config, Fork, ForkHandle, ForkId, Resample, Resamplers, SUBCLASSES, Timeouts,
 };
@@ -31,6 +32,8 @@ const FAILED: &str = "-ERR Operation Failed\n";
 
 /// Created on load, shut down on unload (D6).
 static RUNTIME: Mutex<Option<Runtime>> = Mutex::new(None);
+/// One queue for all forks, so their events are fired in the order the forks queued them.
+static EVENTS: Mutex<Option<EventQueue>> = Mutex::new(None);
 
 /// Touched on start, stop, send_text, CLOSE and unload, never per frame; `None` while not loaded.
 static REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
@@ -89,6 +92,7 @@ unsafe extern "C" fn load(
             .enable_all()
             .build()
             .expect("building the tokio runtime");
+        *EVENTS.lock() = Some(EventQueue::start(Arc::new(FsHost), runtime.handle()));
         *RUNTIME.lock() = Some(runtime);
         *REGISTRY.lock() = Some(Registry::default());
         interface.add_api(c"uuid_audio_fork", c"audio_fork API", SYNTAX, api);
@@ -117,6 +121,7 @@ unsafe extern "C" fn shutdown() -> Status {
         // a call that is hanging up cannot be located any more; FreeSWITCH closes its bug shortly
         wait_for_closes();
         *REGISTRY.lock() = None;
+        *EVENTS.lock() = None;
         if let Some(runtime) = RUNTIME.lock().take() {
             runtime.shutdown_timeout(Duration::from_secs(5));
         }
@@ -235,7 +240,8 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
         playout: playout.and_then(|p| resampler(p.rate, codec_rate, 1)),
     };
     let runtime = RUNTIME.lock().as_ref().unwrap().handle().clone();
-    let (media, handle) = Fork::start(config, Arc::new(FsHost), resamplers, &runtime)
+    let events = EVENTS.lock().clone().unwrap();
+    let (media, handle) = Fork::start(config, Arc::new(FsHost), &events, resamplers, &runtime)
         .map_err(|e| format!("{id}: metadata: {e}"))?;
 
     let serial = SERIAL.fetch_add(1, Ordering::Relaxed);

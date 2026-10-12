@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use audio_fork::api::{Capture, CaptureRate, Mix};
+use audio_fork::events::EventQueue;
 use audio_fork::fork::{
     Config, Event, Fork, ForkHandle, ForkId, Host, MediaSide, Resamplers, Timeouts,
 };
@@ -89,9 +90,11 @@ pub fn start_with(
         playout_rate,
         timeouts,
     };
+    let events = EventQueue::start(host.clone(), &Handle::current());
     let (media, handle) = Fork::start(
         config,
         host.clone(),
+        &events,
         Resamplers::default(),
         &Handle::current(),
     )

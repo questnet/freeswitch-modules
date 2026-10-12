@@ -21,6 +21,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::api::{Capture, WsUrl};
+use crate::events::EventQueue;
 use crate::playout::{Playout, Prebuffer};
 use crate::socket;
 
@@ -186,8 +187,9 @@ pub(crate) struct Shared {
     pub wake: Notify,
     /// Set by the task while frames can be sent; the media side drops frames otherwise, as there is nobody to send them to.
     pub streaming: AtomicBool,
-    /// Cancelled at CLOSE, under the state lock; the task then flushes texts, sends the close frame and ends, and no event fires any more.
+    /// Cancelled at CLOSE; the task then flushes texts, sends the close frame and ends, and no event is queued any more.
     pub closed: CancellationToken,
+    events: EventQueue,
     /// Present when server audio is played to the caller.
     pub playout: Option<Playout>,
     #[cfg(feature = "test-hooks")]
@@ -195,13 +197,11 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    /// Fires unless CLOSE ran. Under the state lock, which CLOSE takes too, so no event can follow it.
-    pub fn fire(&self, host: &dyn Host, event: Event) {
-        let state = self.state.lock();
+    /// Queues the event unless CLOSE ran; what was queued before it is still fired.
+    pub fn fire(&self, event: Event) {
         if !self.closed.is_cancelled() {
-            host.fire(&self.id, event);
+            self.events.fire(self.id.clone(), event);
         }
-        drop(state);
     }
 }
 
@@ -268,6 +268,7 @@ impl Fork {
     pub fn start(
         config: Config,
         host: Arc<dyn Host>,
+        events: &EventQueue,
         resamplers: Resamplers,
         runtime: &Handle,
     ) -> Result<(MediaSide, ForkHandle), TextError> {
@@ -281,6 +282,7 @@ impl Fork {
             wake: Notify::new(),
             streaming: AtomicBool::new(false),
             closed: CancellationToken::new(),
+            events: events.clone(),
             playout: config.playout_rate.map(|_| Playout::default()),
             #[cfg(feature = "test-hooks")]
             inject: Inject::default(),
@@ -301,11 +303,9 @@ impl Fork {
             consumer,
             inbound,
         ));
-        runtime.spawn(supervise(task, shared.clone(), host.clone()));
+        runtime.spawn(supervise(task, shared.clone(), host));
         let media = MediaSide {
             shared: shared.clone(),
-            host,
-            runtime: runtime.clone(),
             capture: producer,
             resampler: resamplers.capture,
             resampled: Vec::new(),
@@ -325,7 +325,7 @@ async fn supervise(task: JoinHandle<()>, shared: Arc<Shared>, host: Arc<dyn Host
     let message = panic_message(e.into_panic());
     let id = &shared.id;
     tracing::error!(target: "crit", session = %id.session, "{id}: socket task panicked: {message}");
-    shared.fire(&*host, panic_event(&message));
+    shared.fire(panic_event(&message));
     if !shared.closed.is_cancelled() {
         host.end(id);
     }
@@ -349,8 +349,6 @@ fn panic_event(message: &str) -> Event {
 /// The media thread's side of a fork; never blocks.
 pub struct MediaSide {
     shared: Arc<Shared>,
-    host: Arc<dyn Host>,
-    runtime: Handle,
     capture: Producer<i16>,
     resampler: Option<Box<dyn Resample>>,
     resampled: Vec<i16>,
@@ -399,16 +397,13 @@ impl MediaSide {
         }
         self.overrun_notified = true;
         tracing::error!(session = %self.shared.id.session, "{}: capture buffer full, dropping frames", self.shared.id);
-        // fired from the runtime, so the media thread does not wait for the event to be created
-        let (host, shared) = (self.host.clone(), self.shared.clone());
-        self.runtime
-            .spawn(async move { shared.fire(&*host, Event::BufferOverrun) });
+        self.shared.fire(Event::BufferOverrun);
     }
 
     /// After a panic in the media callback, which then has FreeSWITCH remove the bug: fires `error`.
-    /// From the media thread itself, as the CLOSE that follows right away silences the fork.
+    /// Queued from the media thread itself, so before the CLOSE that follows.
     pub fn panicked(&self, message: &str) {
-        self.shared.fire(&*self.host, panic_event(message));
+        self.shared.fire(panic_event(message));
     }
 
     /// Mixes server audio into a frame going to the caller; returns whether it changed the frame.
@@ -429,11 +424,8 @@ impl MediaSide {
 // a media side dropped any other way (a start that lost a race, a panic in CLOSE) must not leave its task running
 impl Drop for MediaSide {
     fn drop(&mut self) {
-        let mut state = self.shared.state.lock();
-        state.closing = true;
-        // under the lock, which `Shared::fire` holds while it checks the token
+        self.shared.state.lock().closing = true;
         self.shared.closed.cancel();
-        drop(state);
     }
 }
 
