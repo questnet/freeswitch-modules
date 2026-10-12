@@ -2,6 +2,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 use audio_fork::fork::{Event, PanicIn, Timeouts};
 use common::{FRAME, start};
 use test_server::Server;
@@ -21,6 +23,13 @@ async fn task_panic_ends_that_fork_only() {
         unreachable!()
     };
     assert!(body.contains("injected in the socket task"), "{body}");
+    // the supervisor ends the fork right after firing the error
+    for _ in 0..100 {
+        if !one_host.ends.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(one_host.ends.lock().unwrap().len(), 1);
 
     one.on_read(&FRAME);

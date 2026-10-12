@@ -28,11 +28,11 @@ Numbers as in the review.
 - [x] **1.4 Lifecycle in mirrored state** (Low, `fork.rs`). `Outbox.closed` mirrors the `closed` token; the struct named `Outbox` guards the lifecycle too. Fixed: the token is cancelled under the lock and tested there; the struct is `State`.
 - [x] **1.5 `wss://` reloads the system certificates on every connect** (Low, `socket.rs`). tokio-tungstenite builds a rustls config per connection without a connector (`tls.rs:95-100`), blocking file I/O on a runtime worker. Fixed: one `ClientConfig` per process, passed as `Connector::Rustls` (still untested, see the verification gaps).
 - [x] **1.6 The registry's "module is loaded" unwrap at every use** (Low, `mod_audio_fork/src/lib.rs`). Fixed: `registry()`.
-- [ ] **2.1–2.3 Comments**: `fork.rs` overrun comment contradicted by `panicked()`; `lib.rs` `closed()` comment claims the invariant 1.1 breaks; `api.rs` module doc contrasts with the removed C module.
-- [ ] **3.1 `hangup_during_connect_cancels_without_events` cannot fail for its stated reason** (`audio_fork/tests/simulation.rs`): it waits 300 ms against the 10 s default connect timeout.
-- [ ] **3.2 `task_panic_ends_that_fork_only` is racy** (`audio_fork/tests/panics.rs`): `end` is called after `error` fires, the test asserts it right after the event.
-- [ ] **3.3 `first_counter` underflows on a run starting at 0** (`fs_tests/tests/load.rs`).
-- [ ] **3.5 Missing tests**: `killAudio` followed by a new stream plays it from its first sample and without the old tail (1.2); unload with hangups in flight (1.1).
+- [x] **2.1–2.3 Comments**: `fork.rs` overrun comment contradicted by `panicked()`; `lib.rs` `closed()` comment claims the invariant 1.1 breaks; `api.rs` module doc contrasts with the removed C module.
+- [x] **3.1 `hangup_during_connect_cancels_without_events` cannot fail for its stated reason** (`audio_fork/tests/simulation.rs`): it waits 300 ms against the 10 s default connect timeout.
+- [x] **3.2 `task_panic_ends_that_fork_only` is racy** (`audio_fork/tests/panics.rs`): `end` is called after `error` fires, the test asserts it right after the event.
+- [x] **3.3 `first_counter` underflows on a run starting at 0** (`fs_tests/tests/load.rs`).
+- [x] **3.5 Missing tests**: `killAudio` followed by a new stream plays it from its first sample and without the old tail (1.2); unload with hangups in flight (1.1). Both added. The reworked 3.1 test also caught that the 1.5 connector read the system roots for `ws://` too, inside the connect timeout; fixed.
 
 ## Compatibility notes (intentional, D1 and D13)
 

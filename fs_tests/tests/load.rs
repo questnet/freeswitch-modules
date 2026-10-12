@@ -70,8 +70,10 @@ async fn load(fs: &FreeSwitch, n: usize) -> String {
 
 /// Where in a recording the streamed counter would have started: the first run of 16 consecutive
 /// values, moved back by the value it starts at (the first frame played can be missing from it).
+/// The run can begin on the silent 0 just before the counter's 1.
 fn first_counter(samples: &[i16]) -> Option<usize> {
     let consecutive = |w: &[i16]| w.windows(2).all(|p| p[1] == p[0].wrapping_add(1));
     let index = samples.windows(16).position(consecutive)?;
-    index.checked_sub(samples[index] as u16 as usize - 1)
+    let value = samples[index] as u16 as i64;
+    usize::try_from(index as i64 - (value - 1)).ok()
 }

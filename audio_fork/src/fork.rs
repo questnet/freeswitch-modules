@@ -401,7 +401,7 @@ impl MediaSide {
         }
         self.overrun_notified = true;
         tracing::error!(session = %self.shared.id.session, "{}: capture buffer full, dropping frames", self.shared.id);
-        // fired from the runtime: the media thread does not call into the host
+        // fired from the runtime, so the media thread does not wait for the event to be created
         let (host, shared) = (self.host.clone(), self.shared.clone());
         self.runtime
             .spawn(async move { shared.fire(&*host, Event::BufferOverrun) });

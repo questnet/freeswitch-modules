@@ -1,8 +1,7 @@
 //! `uuid_audio_fork` arguments, already split into tokens the way FreeSWITCH splits API commands,
 //! turned into a [`Command`].
 //!
-//! The rules follow the C module's branch structure; where they differ, it is on purpose: rates are
-//! plain integers (no `atoi` leniency) and only `ws://` / `wss://` URLs are accepted.
+//! Rates are plain integers and only `ws://` / `wss://` URLs are accepted: no caller sends anything else.
 
 use std::fmt;
 

@@ -196,10 +196,14 @@ async fn stop_while_connecting_sends_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn hangup_during_connect_cancels_without_events() {
     let mut server = Server::start().await;
-    let (media, _handle, host) = start(&server.url("/"), None, Timeouts::default());
+    // short enough that a task still waiting would fire connect_failed before the check
+    let timeouts = Timeouts {
+        connect: Duration::from_millis(100),
+        ..Timeouts::default()
+    };
+    let (media, _handle, host) = start(&server.url("/"), None, timeouts);
     let _held = server.pending().await;
     media.close();
-    // the connect timeout would fire a connect_failed if the task were still waiting
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(host.events(), vec![]);
 }
