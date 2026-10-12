@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use rtrb::{Producer, RingBuffer};
+use serde_json::json;
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -89,9 +90,7 @@ impl Event {
 
     pub fn body(&self) -> Option<String> {
         match self {
-            Event::ConnectFailed { reason } => {
-                Some(serde_json::json!({ "reason": reason }).to_string())
-            }
+            Event::ConnectFailed { reason } => Some(json!({ "reason": reason }).to_string()),
             Event::Disconnect(body) | Event::Error(body) => body.clone(),
             Event::Json(body) => Some(body.clone()),
             Event::Connect | Event::KillAudio | Event::BufferOverrun => None,
@@ -364,7 +363,7 @@ pub fn panic_message(payload: Box<dyn Any + Send>) -> String {
 
 fn panic_event(message: &str) -> Event {
     Event::Error(Some(
-        serde_json::json!({ "reason": format!("panic: {message}") }).to_string(),
+        json!({ "reason": format!("panic: {message}") }).to_string(),
     ))
 }
 
