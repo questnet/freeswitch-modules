@@ -108,14 +108,18 @@ async fn connect(url: &Uri) -> Result<Socket, tungstenite::Error> {
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_TEXT_LEN))
         .max_frame_size(Some(MAX_TEXT_LEN));
+    // the roots are only read for the first wss:// fork, never for ws://
+    let tls = url
+        .scheme_str()
+        .is_some_and(|s| s.eq_ignore_ascii_case("wss"))
+        .then(tls);
     let (socket, _) =
-        tokio_tungstenite::connect_async_tls_with_config(request, Some(config), true, Some(tls()))
-            .await?;
+        tokio_tungstenite::connect_async_tls_with_config(request, Some(config), true, tls).await?;
     Ok(socket)
 }
 
 /// One TLS configuration for all `wss://` forks: the system's roots are read once, at the first
-/// connect, instead of from disk on a runtime thread for every one. `ws://` ignores it.
+/// connect, instead of from disk on a runtime thread for every one.
 fn tls() -> Connector {
     static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     let config = CONFIG.get_or_init(|| {
