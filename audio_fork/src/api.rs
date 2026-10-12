@@ -209,13 +209,14 @@ fn parse_rate(token: &str, min: u32) -> Result<u32, String> {
 fn parse_url(token: &str) -> Result<Uri, String> {
     let invalid = || format!("invalid websocket url {token}");
     let uri: Uri = token.parse().map_err(|_| invalid())?;
-    let ws = uri
-        .scheme_str()
-        .is_some_and(|s| s.eq_ignore_ascii_case("ws") || s.eq_ignore_ascii_case("wss"));
-    if !ws || uri.host().is_none_or(str::is_empty) {
+    let scheme = uri.scheme_str().unwrap_or_default().to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "ws" | "wss") || uri.host().is_none_or(str::is_empty) {
         return Err(invalid());
     }
-    Ok(uri)
+    // tungstenite only connects to a lower-case scheme; `WS://` was accepted by the C module
+    let mut parts = uri.into_parts();
+    parts.scheme = Some(scheme.parse().unwrap());
+    Ok(Uri::from_parts(parts).unwrap())
 }
 
 #[cfg(test)]
@@ -450,6 +451,15 @@ mod tests {
             })
         );
         assert!(!start.reads());
+    }
+
+    #[test]
+    fn schemes_are_lower_cased_for_tungstenite() {
+        let argv = tokens(&["u", "start", "WSS://host/p", "mono", "8k"]);
+        let Action::Start(start) = parse(&argv).unwrap().action else {
+            panic!()
+        };
+        assert_eq!(start.url.scheme_str(), Some("wss"));
     }
 
     #[test]

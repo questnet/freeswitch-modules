@@ -34,6 +34,10 @@ Numbers as in the review.
 - [x] **3.3 `first_counter` underflows on a run starting at 0** (`fs_tests/tests/load.rs`).
 - [x] **3.5 Missing tests**: `killAudio` followed by a new stream plays it from its first sample and without the old tail (1.2); unload with hangups in flight (1.1). Both added. The reworked 3.1 test also caught that the 1.5 connector read the system roots for `ws://` too, inside the connect timeout; fixed.
 
+Found while fixing:
+
+- [x] **Upper-case URL schemes failed to connect** (`audio_fork/src/api.rs`). The parser accepted `WS://` / `WSS://` (as the C module did), but tungstenite only connects to a lower-case scheme and fired `connect_failed` ("unsupported URL scheme"). Fixed: the parser lower-cases the scheme; unit test `schemes_are_lower_cased_for_tungstenite`.
+
 ## Compatibility notes (intentional, D1 and D13)
 
 Dropped compared to the C module: the subcommands `pause`, `resume`, `graceful-shutdown`, `stop_play`; the `transfer` message and event; all `MOD_AUDIO_FORK_*` environment variables; the channel variables `MOD_AUDIO_BASIC_AUTH_USERNAME`/`_PASSWORD` (basic auth) and `MOD_AUDIO_FORK_ALLOW_SELFSIGNED`, `_SKIP_SERVER_CERT_HOSTNAME_CHECK`, `_ALLOW_EXPIRED` (TLS checks are always on); `http://` and `https://` URLs. Rates must be plain integers (the C `atoi` accepted `8000x`). Malformed `start` arguments are answered with `-USAGE` where the C module sent no reply (ESL clients saw `-ERR no reply`). Within questnet only the IVR and audio-knife use the module, and neither uses any of these (checked 2026-10-12).
