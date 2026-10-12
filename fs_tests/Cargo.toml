@@ -16,3 +16,7 @@ test_server.workspace = true
 [[test]]
 name = "fs"
 harness = false
+
+[[test]]
+name = "load"
+harness = false

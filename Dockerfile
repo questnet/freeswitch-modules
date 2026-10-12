@@ -79,8 +79,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,targe
     cargo build --release --locked -p mod_audio_fork --features test-hooks; \
     cp target/release/libmod_audio_fork.so /out/rust-hooks/mod_audio_fork.so; \
     nm -D --defined-only /out/rust/mod_audio_fork.so | grep -q ' mod_audio_fork_module_interface$'; \
-    exe="$(cargo test --release --locked -p fs_tests --test fs --no-run 2>&1 | sed -n 's/.*Executable .*(\(.*\))$/\1/p')"; \
-    cp "$exe" /out/fs_tests
+    for t in fs load; do \
+      exe="$(cargo test --release --locked -p fs_tests --test $t --no-run 2>&1 | sed -n 's/.*Executable .*(\(.*\))$/\1/p')"; \
+      cp "$exe" /out/fs_tests_$t; \
+    done
 
 # FreeSWITCH, both module builds and the fs_tests binary
 FROM fs-build AS fs-test
@@ -89,7 +91,8 @@ RUN ldconfig
 COPY --from=c-module /out/c /opt/mod_audio_fork/c
 COPY --from=rust /out/rust /opt/mod_audio_fork/rust
 COPY --from=rust /out/rust-hooks /opt/mod_audio_fork/rust-hooks
-COPY --from=rust /out/fs_tests /usr/local/bin/fs_tests
+COPY --from=rust /out/fs_tests_fs /usr/local/bin/fs_tests
+COPY --from=rust /out/fs_tests_load /usr/local/bin/fs_load
 COPY tests/fs-conf /opt/fs-conf
 ENV FREESWITCH_BIN=/usr/local/freeswitch/bin/freeswitch \
     FREESWITCH_MOD_DIR=/usr/local/freeswitch/lib/freeswitch/mod \

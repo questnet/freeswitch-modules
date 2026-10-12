@@ -26,6 +26,12 @@ test-fs filter="": prereqs
     docker run --rm -e AUDIO_FORK_MODULE=c {{image}}-fs-test fs_tests {{filter}}
     docker run --rm -e AUDIO_FORK_MODULE=rust-hooks {{image}}-fs-test fs_tests {{filter}}
 
+# Load tier: `n` calls with bidirectional audio for 60 s, Rust and C module side by side
+test-load n="20": prereqs
+    docker build {{build_flags}} --target fs-test --tag {{image}}-fs-test --build-arg FS_VERSION={{fs_version}} --build-arg LWS_VERSION={{lws_version}} .
+    docker run --rm -e AUDIO_FORK_MODULE=rust {{image}}-fs-test fs_load {{n}}
+    docker run --rm -e AUDIO_FORK_MODULE=c {{image}}-fs-test fs_load {{n}}
+
 # Rebuild from scratch, ignoring the Docker cache
 rebuild: prereqs
     docker build --no-cache --target fs-test --tag {{image}}-fs-test .

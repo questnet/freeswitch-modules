@@ -3,12 +3,13 @@
 //! does what the test tells it (send, stall, close, drop the TCP connection).
 
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -191,6 +192,82 @@ impl Sink {
 
     pub fn accepted(&self) -> usize {
         self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+/// A server that accepts every connection, discards what it receives and streams back a running
+/// counter (from 1) in real time, 20 ms per frame: playout for the load tier. Remembers when each
+/// path started streaming.
+#[derive(Debug, Clone)]
+pub struct Streamer {
+    addr: SocketAddr,
+    started: Arc<Mutex<HashMap<String, Instant>>>,
+}
+
+impl Streamer {
+    pub async fn start(rate: u32) -> Streamer {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let streamer = Streamer {
+            addr: listener.local_addr().unwrap(),
+            started: Arc::default(),
+        };
+        let started = streamer.started.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(stream_counter(stream, rate, started.clone()));
+            }
+        });
+        streamer
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("ws://{}{path}", self.addr)
+    }
+
+    /// When the connection to `path` sent its first frame.
+    pub fn started(&self, path: &str) -> Option<Instant> {
+        self.started.lock().unwrap().get(path).copied()
+    }
+}
+
+// the callback's error type is tungstenite's
+#[allow(clippy::result_large_err)]
+async fn stream_counter(
+    stream: TcpStream,
+    rate: u32,
+    started: Arc<Mutex<HashMap<String, Instant>>>,
+) {
+    let mut path = String::new();
+    let callback = |request: &Request, mut response: Response| {
+        path = request.uri().path().to_string();
+        if let Some(p) = request.headers().get("Sec-WebSocket-Protocol") {
+            response
+                .headers_mut()
+                .insert("Sec-WebSocket-Protocol", p.clone());
+        }
+        Ok(response)
+    };
+    let Ok(ws) = tokio_tungstenite::accept_hdr_async(stream, callback).await else {
+        return;
+    };
+    let (mut tx, mut rx) = ws.split();
+    tokio::spawn(async move { while let Some(Ok(_)) = rx.next().await {} });
+    let per_frame = rate as usize / 50;
+    let mut next: u16 = 1;
+    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    started.lock().unwrap().insert(path, Instant::now());
+    loop {
+        tick.tick().await;
+        let frame: Vec<u8> = (0..per_frame)
+            .flat_map(|_| {
+                let s = next;
+                next = next.wrapping_add(1);
+                s.to_le_bytes()
+            })
+            .collect();
+        if tx.send(Message::binary(frame)).await.is_err() {
+            return;
+        }
     }
 }
 

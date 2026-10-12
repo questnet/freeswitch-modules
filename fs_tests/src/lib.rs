@@ -185,6 +185,26 @@ impl FreeSwitch {
         fs
     }
 
+    /// CPU time FreeSWITCH has used so far, user and system.
+    pub fn cpu_time(&self) -> Duration {
+        let pid = self.child.id().expect("freeswitch has exited");
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        // the command name may contain spaces; the fields after it are space separated
+        let fields: Vec<&str> = stat[stat.rfind(')').unwrap() + 2..].split(' ').collect();
+        let ticks: u64 = fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap();
+        // USER_HZ, 100 on every Linux the image runs on
+        Duration::from_millis(ticks * 10)
+    }
+
+    /// The number of `mod_audio_fork::buffer_overrun` events so far.
+    pub fn overruns(&self) -> usize {
+        self.events
+            .all()
+            .iter()
+            .filter(|e| e.subclass == "mod_audio_fork::buffer_overrun")
+            .count()
+    }
+
     /// Runs an API command that must reply `+OK`.
     pub async fn api_ok(&self, command: &str) {
         let reply = self.api(command).await;
@@ -372,6 +392,12 @@ impl Call<'_> {
             .api_ok(&format!("uuid_record {} start {}", self.b, file.display()))
             .await;
         file
+    }
+
+    /// Like [`Call::record_b`]; also returns when the recording started.
+    pub async fn record_b_timed(&self) -> (PathBuf, std::time::Instant) {
+        let file = self.record_b().await;
+        (file, std::time::Instant::now())
     }
 
     /// Stops the recording and returns its samples.
@@ -577,6 +603,22 @@ pub enum Needs {
 
 /// Runs the scenarios whose name contains the first command-line argument (all without one)
 /// against one FreeSWITCH, and exits non-zero if any failed or FreeSWITCH did not stop cleanly.
+/// Starts FreeSWITCH for `run_with` and stops it after `f`, failing on a crash or CRIT.
+pub fn with_freeswitch<T>(
+    f: impl for<'a> FnOnce(&'a FreeSwitch) -> Pin<Box<dyn Future<Output = T> + 'a>>,
+) -> T {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let fs = FreeSwitch::start(Variant::from_env()).await;
+        let result = f(&fs).await;
+        fs.stop().await;
+        result
+    })
+}
+
 pub fn run(scenarios: &[(&str, Needs, Scenario)]) {
     let filter = env::args().nth(1).filter(|a| !a.starts_with('-'));
     let runtime = tokio::runtime::Builder::new_multi_thread()
