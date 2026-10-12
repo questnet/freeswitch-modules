@@ -15,6 +15,8 @@ rtrb.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
 serde_json.workspace = true
+# TCP keepalive on the WebSocket's connection, which tokio's TcpStream cannot set
+socket2 = "0.6"
 tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 tokio-util.workspace = true

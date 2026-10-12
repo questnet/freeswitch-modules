@@ -4,10 +4,12 @@
 #[cfg(feature = "test-hooks")]
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use rtrb::Consumer;
 use rustls::{ClientConfig, RootCertStore};
+use socket2::{SockRef, TcpKeepalive};
 use tokio::net::TcpStream;
 use tokio::select;
 use tokio::time;
@@ -23,6 +25,12 @@ use crate::fork::{Config, Event, Host, MAX_TEXT_LEN, Phase, Resample, Shared};
 use crate::playout::Prebuffer;
 
 const SUBPROTOCOL: &str = "audio.drachtio.org";
+/// As the C module: a half-open connection, which a playback fork never writes to, is noticed after
+/// 55 s without traffic and 4 unanswered probes 5 s apart.
+const KEEPALIVE: TcpKeepalive = TcpKeepalive::new()
+    .with_time(Duration::from_secs(55))
+    .with_interval(Duration::from_secs(5))
+    .with_retries(4);
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -104,10 +112,14 @@ async fn connect(url: &WsUrl) -> Result<Socket, tungstenite::Error> {
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_TEXT_LEN))
         .max_frame_size(Some(MAX_TEXT_LEN));
+    // connected here rather than by tokio-tungstenite, which offers no way to set the keepalive
+    let tcp = TcpStream::connect(url.address()).await?;
+    tcp.set_nodelay(true)?;
+    SockRef::from(&tcp).set_tcp_keepalive(&KEEPALIVE)?;
     // the roots are only read for the first wss:// fork, never for ws://
     let tls = url.tls().then(tls);
     let (socket, _) =
-        tokio_tungstenite::connect_async_tls_with_config(request, Some(config), true, tls).await?;
+        tokio_tungstenite::client_async_tls_with_config(request, tcp, Some(config), tls).await?;
     Ok(socket)
 }
 

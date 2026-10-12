@@ -140,6 +140,21 @@ impl WsUrl {
     pub fn tls(&self) -> bool {
         self.tls
     }
+
+    /// The host to connect to, without the brackets of an IPv6 literal, and the port, 443 or 80 by
+    /// default.
+    pub fn address(&self) -> (&str, u16) {
+        let host = self.uri.host().expect("checked when parsed");
+        let host = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host);
+        let port = self
+            .uri
+            .port_u16()
+            .unwrap_or(if self.tls { 443 } else { 80 });
+        (host, port)
+    }
 }
 
 impl FromStr for WsUrl {

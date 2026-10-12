@@ -22,6 +22,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "serde_json",
+ "socket2",
  "test_server",
  "tokio",
  "tokio-tungstenite",
