@@ -60,7 +60,30 @@ pub enum Direction {
 pub struct Capture {
     pub mix: Mix,
     /// The rate audio is sent to the server at.
-    pub rate: u32,
+    pub rate: CaptureRate,
+}
+
+/// A multiple of 8000 up to [`MAX_SAMPLE_RATE`]; only built through `try_from`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureRate(u32);
+
+impl CaptureRate {
+    pub fn hz(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for CaptureRate {
+    type Error = String;
+
+    fn try_from(hz: u32) -> Result<Self, String> {
+        if hz == 0 || hz > MAX_SAMPLE_RATE || !hz.is_multiple_of(8000) {
+            return Err(format!(
+                "invalid sample rate {hz}, must be a multiple of 8000 up to {MAX_SAMPLE_RATE}"
+            ));
+        }
+        Ok(CaptureRate(hz))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,12 +271,10 @@ fn parse_start(args: &[String]) -> Result<Start, String> {
         "16k" => 16000,
         other => parse_rate(other, 1)?,
     };
-    if rate % 8000 != 0 {
-        return Err(format!(
-            "invalid sample rate {rate}, must be a multiple of 8000"
-        ));
-    }
-    let capture = Capture { mix, rate };
+    let capture = Capture {
+        mix,
+        rate: CaptureRate::try_from(rate)?,
+    };
     let direction = match playout {
         None => Direction::Capture(capture),
         Some(playout) if !playback => Direction::Bidi(capture, playout),
@@ -391,7 +412,11 @@ mod tests {
             {
                 return usage();
             }
-            let capture = Capture { mix, rate };
+            // built directly, so a rate the parser wrongly rejects shows up as a difference
+            let capture = Capture {
+                mix,
+                rate: CaptureRate(rate),
+            };
             let direction = match playout {
                 None => Direction::Capture(capture),
                 Some((playout, false)) => Direction::Bidi(capture, playout),

@@ -20,7 +20,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::api::WsUrl;
+use crate::api::{Capture, WsUrl};
 use crate::playout::{Playout, Prebuffer};
 use crate::socket;
 
@@ -114,11 +114,10 @@ pub trait Resample: Send {
 pub struct Config {
     pub id: ForkId,
     pub url: WsUrl,
-    pub channels: usize,
+    /// The audio sent to the server; `None` for playback, which sends none.
+    pub capture: Option<Capture>,
     /// The rate frames arrive at from the media thread.
     pub codec_rate: u32,
-    /// The rate audio is sent to the server at.
-    pub rate: u32,
     pub metadata: Option<String>,
     /// The rate the server sends audio at, when it is played to the caller (write-replace).
     pub playout_rate: Option<u32>,
@@ -290,7 +289,10 @@ impl Fork {
             prebuffer: Prebuffer::new(rate, config.codec_rate),
             resampler: resamplers.playout,
         });
-        let capacity = config.rate as usize * config.channels * CAPTURE_BUFFER_SECS;
+        // playback attaches no read or write stream, so nothing could fill a capture buffer
+        let capacity = config.capture.map_or(0, |c| {
+            c.rate.hz() as usize * c.channels() * CAPTURE_BUFFER_SECS
+        });
         let (producer, consumer) = RingBuffer::new(capacity);
         let task = runtime.spawn(socket::run(
             config,

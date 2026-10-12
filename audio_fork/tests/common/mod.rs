@@ -5,6 +5,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use audio_fork::api::{Capture, CaptureRate, Mix};
 use audio_fork::fork::{
     Config, Event, Fork, ForkHandle, ForkId, Host, MediaSide, Resamplers, Timeouts,
 };
@@ -79,9 +80,11 @@ pub fn start_with(
             bugname: "bug".to_string(),
         },
         url: url.parse().unwrap(),
-        channels: 1,
+        capture: Some(Capture {
+            mix: Mix::Mono,
+            rate: CaptureRate::try_from(8000).unwrap(),
+        }),
         codec_rate: 8000,
-        rate: 8000,
         metadata: metadata.map(str::to_string),
         playout_rate,
         timeouts,

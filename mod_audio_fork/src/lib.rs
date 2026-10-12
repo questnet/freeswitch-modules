@@ -215,14 +215,11 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
         .ok_or_else(|| format!("{id}: channel has no read codec"))?;
     let capture = start.direction.capture();
     let playout = start.direction.playout();
-    // playback attaches no read or write stream, so its capture buffer stays empty and unresampled
-    let (channels, rate) = capture.map_or((1, codec_rate), |c| (c.channels(), c.rate));
     let config = Config {
         id: id.clone(),
         url: start.url.clone(),
-        channels,
+        capture,
         codec_rate,
-        rate,
         metadata: start.metadata.clone(),
         playout_rate: playout.map(|p| p.rate),
         timeouts: Timeouts::default(),
@@ -234,7 +231,7 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
         })
     };
     let resamplers = Resamplers {
-        capture: resampler(codec_rate, rate, channels),
+        capture: capture.and_then(|c| resampler(codec_rate, c.rate.hz(), c.channels())),
         playout: playout.and_then(|p| resampler(p.rate, codec_rate, 1)),
     };
     let runtime = RUNTIME.lock().as_ref().unwrap().handle().clone();
