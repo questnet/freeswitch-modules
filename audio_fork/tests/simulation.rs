@@ -362,3 +362,15 @@ async fn kill_audio_drops_what_the_prebuffer_still_holds() {
     );
     media.close();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_the_media_side_ends_the_fork() {
+    let mut server = Server::start().await;
+    let (media, _handle, host) = start(&server.url("/"), None, Timeouts::default());
+    let mut conn = server.accept().await;
+    host.wait_for(|e| *e == Event::Connect).await;
+    // a start that loses a race, or a panic in CLOSE, drops it without close()
+    drop(media);
+    assert_eq!(conn.next().await, Some(Frame::Close));
+    assert_eq!(conn.next().await, None);
+}

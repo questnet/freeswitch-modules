@@ -425,7 +425,12 @@ impl MediaSide {
     }
 
     /// The bug's CLOSE: the task sends what is queued, closes the socket and ends.
-    pub fn close(self) {
+    pub fn close(self) {}
+}
+
+// a media side dropped any other way (a start that lost a race, a panic in CLOSE) must not leave its task running
+impl Drop for MediaSide {
+    fn drop(&mut self) {
         let mut state = self.shared.state.lock();
         state.closing = true;
         // under the lock, which `Shared::fire` holds while it checks the token
