@@ -61,8 +61,8 @@ pub(crate) async fn run(
     };
     let mut socket = match connected {
         Ok(Ok(socket)) => socket,
-        Ok(Err(e)) => return connect_failed(&shared, e.to_string()),
-        Err(_) => return connect_failed(&shared, "connect timed out".to_string()),
+        Ok(Err(e)) => return connect_failed(&shared, e.to_string()).await,
+        Err(_) => return connect_failed(&shared, "connect timed out".to_string()).await,
     };
     if shared.closed.is_cancelled() || !shared.state.lock().open() {
         // stopped or closed during the handshake: nothing is sent, not even the queued texts
@@ -72,7 +72,7 @@ pub(crate) async fn run(
         return;
     }
     info!(session = %id.session, "{id}: connected to {}", config.url);
-    shared.fire(Event::Connect);
+    shared.fire(Event::Connect).await;
 
     let end = stream(&mut socket, &shared, &*host, &mut capture, &mut inbound).await;
     match end {
@@ -90,7 +90,7 @@ pub(crate) async fn run(
         End::Dropped(reason) => {
             shared.state.lock().phase = Phase::Ended;
             info!(session = %id.session, "{id}: connection dropped: {reason}");
-            shared.fire(Event::Disconnect(None));
+            shared.fire(Event::Disconnect(None)).await;
         }
     }
 }
@@ -131,11 +131,11 @@ fn tls() -> Connector {
     Connector::Rustls(config.clone())
 }
 
-fn connect_failed(shared: &Shared, reason: String) {
+async fn connect_failed(shared: &Shared, reason: String) {
     let id = &shared.id;
     shared.state.lock().phase = Phase::Ended;
     info!(session = %id.session, "{id}: connection failed: {reason}");
-    shared.fire(Event::ConnectFailed { reason });
+    shared.fire(Event::ConnectFailed { reason }).await;
 }
 
 /// Sends texts (in order, before any audio queued after them) and capture audio until CLOSE or the connection ends.
@@ -176,7 +176,7 @@ async fn stream(
             }
             message = socket.next() => match message {
                 Some(Ok(Message::Close(frame))) => return End::Dropped(format!("closed by the server: {frame:?}")),
-                Some(Ok(message)) => receive(shared, host, inbound, message),
+                Some(Ok(message)) => receive(shared, host, inbound, message).await,
                 Some(Err(e)) => return End::Dropped(e.to_string()),
                 None => return End::Dropped("connection closed".to_string()),
             },
@@ -195,13 +195,18 @@ async fn send(socket: &mut Socket, shared: &Shared, message: Message) -> Result<
     }
 }
 
-fn receive(shared: &Shared, host: &dyn Host, inbound: &mut Option<Inbound>, message: Message) {
+async fn receive(
+    shared: &Shared,
+    host: &dyn Host,
+    inbound: &mut Option<Inbound>,
+    message: Message,
+) {
     let id = &shared.id;
     match message {
         Message::Text(text) => match parse(&text) {
-            Request::Fire(event) => shared.fire(event),
+            Request::Fire(event) => shared.fire(event).await,
             Request::KillAudio => {
-                shared.fire(Event::KillAudio);
+                shared.fire(Event::KillAudio).await;
                 host.break_playback(&id.session);
                 if let (Some(inbound), Some(playout)) = (inbound, &shared.playout) {
                     inbound.prebuffer.reset();

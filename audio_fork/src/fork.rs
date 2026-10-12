@@ -18,6 +18,7 @@ use parking_lot::Mutex;
 use rtrb::{Producer, RingBuffer};
 use serde_json::json;
 use tokio::runtime::Handle;
+use tokio::select;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -195,10 +196,17 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    /// Queues the event unless CLOSE ran; what was queued before it is still fired.
-    pub fn fire(&self, event: Event) {
-        if !self.closed.is_cancelled() {
-            self.events.fire(self.id.clone(), event);
+    /// Queues the event unless CLOSE ran, or runs while it waits for room; what was queued before
+    /// CLOSE is still fired. A CLOSE between the check and the send lets this one event through,
+    /// accepted as a new fork with the same bugname fires nothing before its handshake.
+    pub async fn fire(&self, event: Event) {
+        if self.closed.is_cancelled() {
+            return;
+        }
+        select! {
+            biased;
+            _ = self.closed.cancelled() => {}
+            _ = self.events.fire(self.id.clone(), event) => {}
         }
     }
 }
@@ -327,6 +335,7 @@ impl Fork {
         runtime.spawn(supervise(task, shared.clone(), host));
         let media = MediaSide {
             shared: shared.clone(),
+            runtime: runtime.clone(),
             capture: producer,
             resampler: resamplers.capture,
             resampled: Vec::new(),
@@ -346,7 +355,7 @@ async fn supervise(task: JoinHandle<()>, shared: Arc<Shared>, host: Arc<dyn Host
     let message = panic_message(e.into_panic());
     let id = &shared.id;
     error!(target: "crit", session = %id.session, "{id}: socket task panicked: {message}");
-    shared.fire(panic_event(&message));
+    shared.fire(panic_event(&message)).await;
     if !shared.closed.is_cancelled() {
         host.end(id);
     }
@@ -370,6 +379,7 @@ fn panic_event(message: &str) -> Event {
 /// The media thread's side of a fork; never blocks.
 pub struct MediaSide {
     shared: Arc<Shared>,
+    runtime: Handle,
     capture: Producer<i16>,
     resampler: Option<Box<dyn Resample>>,
     resampled: Vec<i16>,
@@ -418,13 +428,23 @@ impl MediaSide {
         }
         self.overrun_notified = true;
         error!(session = %self.shared.id.session, "{}: capture buffer full, dropping frames", self.shared.id);
-        self.shared.fire(Event::BufferOverrun);
+        self.fire_soon(Event::BufferOverrun);
     }
 
     /// After a panic in the media callback, which then has FreeSWITCH remove the bug: fires `error`.
-    /// Queued from the media thread itself, so before the CLOSE that follows.
     pub fn panicked(&self, message: &str) {
-        self.shared.fire(panic_event(message));
+        self.fire_soon(panic_event(message));
+    }
+
+    /// The media thread must not wait for room in the queue, so a task does. It queues the event
+    /// even when CLOSE comes meanwhile, as the event happened before; a panic's CLOSE follows at once.
+    fn fire_soon(&self, event: Event) {
+        if self.shared.closed.is_cancelled() {
+            return;
+        }
+        let shared = self.shared.clone();
+        self.runtime
+            .spawn(async move { shared.events.fire(shared.id.clone(), event).await });
     }
 
     /// Mixes server audio into a frame going to the caller; returns whether it changed the frame.
