@@ -17,7 +17,7 @@ bindgen = "0.73"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 proptest = "1.12"
 rtrb = "0.4"
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 tokio = "1.53"
 tokio-tungstenite = "0.30"
 tokio-util = "0.7"

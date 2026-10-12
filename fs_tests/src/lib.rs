@@ -195,7 +195,7 @@ impl FreeSwitch {
     /// Whether the module under test shows this intended difference from the Rust module.
     pub fn shows(&self, exception: Exception) -> bool {
         match exception {
-            Exception::SilentRejection => self.variant == Variant::C,
+            Exception::SilentRejection | Exception::NoReceiveLimit => self.variant == Variant::C,
         }
     }
 
@@ -283,6 +283,8 @@ impl FreeSwitch {
 pub enum Exception {
     /// Start arguments with a bad mix or rate get no reply, which ESL reports as `-ERR no reply`, instead of `-USAGE`.
     SilentRejection,
+    /// A text message over 1 MB is delivered (as one `json` event) instead of closing the connection.
+    NoReceiveLimit,
 }
 
 #[derive(Debug)]

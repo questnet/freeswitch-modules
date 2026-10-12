@@ -19,6 +19,7 @@ const FRAME: [i16; 160] = [7; 160];
 #[derive(Debug, Default)]
 struct FakeHost {
     events: Mutex<Vec<Event>>,
+    breaks: Mutex<Vec<String>>,
     fired: Notify,
 }
 
@@ -28,7 +29,9 @@ impl Host for FakeHost {
         self.fired.notify_waiters();
     }
 
-    fn break_playback(&self, _session: &str) {}
+    fn break_playback(&self, session: &str) {
+        self.breaks.lock().unwrap().push(session.to_string());
+    }
 }
 
 impl FakeHost {
@@ -253,4 +256,53 @@ async fn stop_while_connecting_sends_nothing() {
     assert_eq!(conn.next().await, Some(Frame::Close));
     assert_eq!(conn.next().await, None);
     assert_eq!(host.events(), vec![]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inbound_messages_fire_their_events() {
+    let mut server = Server::start().await;
+    let (media, _handle, host) = start(&server.url("/"), None, Timeouts::default());
+    let conn = server.accept().await;
+    host.wait_for(|e| *e == Event::Connect).await;
+    for ignored in [
+        "not json",
+        r#"{"type":"transfer","data":{"to":"x"}}"#,
+        r#"{"type":"playAudio","data":{}}"#,
+    ] {
+        conn.send_text(ignored);
+    }
+    conn.send_text(r#"{"type":"json","z":1,"a":{"b":[1,2]}}"#);
+    conn.send_text(r#"{"no_type": true}"#);
+    conn.send_text(r#"{"type":"error","data":{"code":"x"}}"#);
+    conn.send_text(r#"{"type":"disconnect"}"#);
+    conn.send_text(r#"{"type":"killAudio"}"#);
+    host.wait_for(|e| *e == Event::KillAudio).await;
+    assert_eq!(
+        host.events(),
+        vec![
+            Event::Connect,
+            Event::Json(r#"{"type":"json","z":1,"a":{"b":[1,2]}}"#.to_string()),
+            Event::Json(r#"{"no_type":true}"#.to_string()),
+            Event::Error(Some(r#"{"code":"x"}"#.to_string())),
+            Event::Disconnect(None),
+            Event::KillAudio,
+        ]
+    );
+    assert_eq!(*host.breaks.lock().unwrap(), vec!["session".to_string()]);
+    media.close();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn message_over_the_receive_limit_disconnects() {
+    let mut server = Server::start().await;
+    let (media, _handle, host) = start(&server.url("/"), None, Timeouts::default());
+    let conn = server.accept().await;
+    host.wait_for(|e| *e == Event::Connect).await;
+    conn.send_text(format!(
+        r#"{{"type":"json","x":"{}"}}"#,
+        "x".repeat(MAX_TEXT_LEN)
+    ));
+    host.wait_for(|e| *e == Event::Disconnect(None)).await;
+    assert_eq!(host.events(), vec![Event::Connect, Event::Disconnect(None)]);
+    media.close();
 }

@@ -13,6 +13,8 @@ fn main() {
         ("capture", |fs| Box::pin(capture(fs))),
         ("two_forks", |fs| Box::pin(two_forks(fs))),
         ("events", |fs| Box::pin(events(fs))),
+        ("inbound", |fs| Box::pin(inbound(fs))),
+        ("receive_limit", |fs| Box::pin(receive_limit(fs))),
     ];
     fs_tests::run(scenarios);
 }
@@ -188,5 +190,61 @@ async fn events(fs: &FreeSwitch) {
     assert!(body["reason"].is_string(), "{body}");
     call.fork("stop ev").await;
     call.fork("stop failed").await;
+    call.hangup().await;
+}
+
+/// Server messages become events with the right bodies; unknown types fire nothing.
+async fn inbound(fs: &FreeSwitch) {
+    let mut server = Server::start().await;
+    let call = fs.call(8000).await;
+    call.fork(&format!("start {} mono 8k in", server.url("/")))
+        .await;
+    let conn = server.accept().await;
+    fs.event(&call.a, "in", "mod_audio_fork::connect").await;
+    conn.send_text(r#"{"type":"transfer","data":{"to":"x"}}"#);
+    conn.send_text(r#"{"type":"json","z":1,"a":{"b":[1,2]}}"#);
+    conn.send_text(r#"{"type":"error","data":{"code":"x"}}"#);
+    conn.send_text(r#"{"type":"disconnect"}"#);
+    conn.send_text(r#"{"type":"killAudio"}"#);
+    fs.event(&call.a, "in", "mod_audio_fork::kill_audio").await;
+    let fired: Vec<(String, Option<String>)> = fs
+        .events_of(&call.a)
+        .into_iter()
+        .map(|e| (e.subclass, e.body))
+        .collect();
+    let expected = [
+        ("mod_audio_fork::connect", None),
+        (
+            "mod_audio_fork::json",
+            Some(r#"{"type":"json","z":1,"a":{"b":[1,2]}}"#),
+        ),
+        ("mod_audio_fork::error", Some(r#"{"code":"x"}"#)),
+        ("mod_audio_fork::disconnect", None),
+        ("mod_audio_fork::kill_audio", None),
+    ]
+    .map(|(s, b)| (s.to_string(), b.map(str::to_string)));
+    assert_eq!(fired, expected);
+    call.fork("stop in").await;
+    call.hangup().await;
+}
+
+/// A text message over 1 MB closes the connection.
+async fn receive_limit(fs: &FreeSwitch) {
+    let mut server = Server::start().await;
+    let call = fs.call(8000).await;
+    call.fork(&format!("start {} mono 8k big", server.url("/")))
+        .await;
+    let conn = server.accept().await;
+    fs.event(&call.a, "big", "mod_audio_fork::connect").await;
+    conn.send_text(format!(
+        r#"{{"type":"json","x":"{}"}}"#,
+        "x".repeat(1024 * 1024)
+    ));
+    if fs.shows(Exception::NoReceiveLimit) {
+        fs.event(&call.a, "big", "mod_audio_fork::json").await;
+    } else {
+        fs.event(&call.a, "big", "mod_audio_fork::disconnect").await;
+    }
+    call.fork("stop big").await;
     call.hangup().await;
 }
