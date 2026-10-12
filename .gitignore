@@ -31,8 +31,9 @@
 *.out
 *.app
 
-# Local IDE support (just ide-setup)
+# Local IDE support (just ide-setup; .clangd is left over from the C sources)
 .deps/
+.clangd
 
 # Rust
 /target/
