@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::select;
 use tokio::sync::mpsc;
+use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -52,9 +54,7 @@ impl Server {
 
     /// Whether a connection arrives within `wait`.
     pub async fn connects_within(&mut self, wait: Duration) -> bool {
-        tokio::time::timeout(wait, self.pending.recv())
-            .await
-            .is_ok()
+        time::timeout(wait, self.pending.recv()).await.is_ok()
     }
 }
 
@@ -154,7 +154,7 @@ impl Sink {
     // the callback's error type is tungstenite's
     #[allow(clippy::result_large_err)]
     async fn drain(self, stream: TcpStream, handshake_delay: Duration) {
-        tokio::time::sleep(handshake_delay).await;
+        time::sleep(handshake_delay).await;
         let callback = |request: &Request, mut response: Response| {
             if let Some(p) = request.headers().get("Sec-WebSocket-Protocol") {
                 response
@@ -246,7 +246,7 @@ async fn stream_counter(
     tokio::spawn(async move { while let Some(Ok(_)) = rx.next().await {} });
     let per_frame = rate as usize / 50;
     let mut next: u16 = 1;
-    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    let mut tick = time::interval(Duration::from_millis(20));
     started.lock().unwrap().insert(path, Instant::now());
     loop {
         tick.tick().await;
@@ -356,7 +356,7 @@ async fn serve(
 ) {
     let mut stalled = false;
     loop {
-        tokio::select! {
+        select! {
             command = commands.recv() => match command {
                 Some(Command::Send(m)) => {
                     if ws.send(m).await.is_err() {
@@ -385,7 +385,7 @@ async fn serve(
 
 /// Every wait in a test is bounded, so a missing frame fails the test instead of hanging it.
 async fn within<T>(f: impl Future<Output = T>) -> T {
-    tokio::time::timeout(Duration::from_secs(10), f)
+    time::timeout(Duration::from_secs(10), f)
         .await
         .expect("timed out waiting for the client")
 }

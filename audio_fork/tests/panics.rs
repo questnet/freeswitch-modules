@@ -7,6 +7,7 @@ use std::time::Duration;
 use audio_fork::fork::{Event, PanicIn, Timeouts};
 use common::{FRAME, start};
 use test_server::Server;
+use tokio::time;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn task_panic_ends_that_fork_only() {
@@ -28,7 +29,7 @@ async fn task_panic_ends_that_fork_only() {
         if !one_host.ends.lock().unwrap().is_empty() {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(one_host.ends.lock().unwrap().len(), 1);
 

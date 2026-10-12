@@ -9,6 +9,8 @@ use futures_util::{SinkExt, StreamExt};
 use rtrb::Consumer;
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
+use tokio::select;
+use tokio::time;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -47,7 +49,7 @@ pub(crate) async fn run(
     mut inbound: Option<Inbound>,
 ) {
     let id = &shared.id;
-    let connected = tokio::select! {
+    let connected = select! {
         biased;
         _ = shared.closed.cancelled() => {
             // hung up or stopped while connecting: the connection attempt is dropped, nothing is sent
@@ -55,7 +57,7 @@ pub(crate) async fn run(
             shared.state.lock().phase = Phase::Ended;
             return;
         }
-        connected = tokio::time::timeout(config.timeouts.connect, connect(&config.url)) => connected,
+        connected = time::timeout(config.timeouts.connect, connect(&config.url)) => connected,
     };
     let mut socket = match connected {
         Ok(Ok(socket)) => socket,
@@ -66,7 +68,7 @@ pub(crate) async fn run(
         // stopped or closed during the handshake: nothing is sent, not even the queued texts
         debug!(session = %id.session, "{id}: stopped while connecting");
         shared.state.lock().phase = Phase::Ended;
-        let _ = tokio::time::timeout(config.timeouts.close, socket.close(None)).await;
+        let _ = time::timeout(config.timeouts.close, socket.close(None)).await;
         return;
     }
     info!(session = %id.session, "{id}: connected to {}", config.url);
@@ -75,8 +77,7 @@ pub(crate) async fn run(
     let end = stream(&mut socket, &shared, &*host, &mut capture, &mut inbound).await;
     match end {
         End::Closed => {
-            let flushed =
-                tokio::time::timeout(config.timeouts.close, close(&mut socket, &shared)).await;
+            let flushed = time::timeout(config.timeouts.close, close(&mut socket, &shared)).await;
             shared.state.lock().phase = Phase::Ended;
             match flushed {
                 Ok(Ok(())) => debug!(session = %id.session, "{id}: closed"),
@@ -164,7 +165,7 @@ async fn stream(
                 return end;
             }
         }
-        tokio::select! {
+        select! {
             biased;
             _ = shared.closed.cancelled() => return End::Closed,
             _ = shared.wake.notified() => {
@@ -187,7 +188,7 @@ async fn stream(
 async fn send(socket: &mut Socket, shared: &Shared, message: Message) -> Result<(), End> {
     // the send first: a text already taken off the queue must not be lost to a CLOSE that came
     // meanwhile; the token only ends a send that stalls
-    tokio::select! {
+    select! {
         biased;
         sent = socket.send(message) => sent.map_err(|e| End::Dropped(e.to_string())),
         _ = shared.closed.cancelled() => Err(End::Closed),

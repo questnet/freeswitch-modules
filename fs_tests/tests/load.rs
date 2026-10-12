@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use fs_tests::FreeSwitch;
 use test_server::Streamer;
+use tokio::time;
 
 const SECONDS: u64 = 60;
 
@@ -32,7 +33,7 @@ async fn load(fs: &FreeSwitch, n: usize) -> String {
         calls.push((call, recording, recording_started));
     }
     let cpu_before = fs.cpu_time();
-    tokio::time::sleep(Duration::from_secs(SECONDS)).await;
+    time::sleep(Duration::from_secs(SECONDS)).await;
     let cpu = fs.cpu_time() - cpu_before;
 
     let mut delays = Vec::new();

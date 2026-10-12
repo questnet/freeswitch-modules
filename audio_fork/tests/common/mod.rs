@@ -10,7 +10,7 @@ use audio_fork::events::EventQueue;
 use audio_fork::fork::{
     Config, Event, Fork, ForkHandle, ForkId, Host, MediaSide, Resamplers, Timeouts,
 };
-use tokio::{runtime::Handle, sync::Notify};
+use tokio::{runtime::Handle, sync::Notify, time};
 
 /// 20 ms at 8 kHz.
 pub const FRAME: [i16; 160] = [7; 160];
@@ -54,7 +54,7 @@ impl FakeHost {
                 fired.await;
             }
         };
-        tokio::time::timeout(Duration::from_secs(10), wait)
+        time::timeout(Duration::from_secs(10), wait)
             .await
             .unwrap_or_else(|_| panic!("event not fired; got {:?}", self.events()))
     }

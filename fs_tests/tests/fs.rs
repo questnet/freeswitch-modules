@@ -5,6 +5,7 @@ use std::time::Duration;
 use fs_tests::audio::{assert_counter, channel, frequency, samples};
 use fs_tests::{FreeSwitch, Needs, Scenario};
 use test_server::{Frame, Server, Sink};
+use tokio::time;
 
 /// `(name, needs, scenario)` entries, named after their functions.
 macro_rules! scenarios {
@@ -269,7 +270,7 @@ async fn bidi_playout(fs: &FreeSwitch) {
         .await;
         let conn = server.accept().await;
         send_counter(&conn, rate, 2);
-        tokio::time::sleep(Duration::from_millis(2600)).await;
+        time::sleep(Duration::from_millis(2600)).await;
         let played = call.recorded_b(&recording).await;
         let n = assert_counter(&played);
         assert!(
@@ -310,7 +311,7 @@ async fn bidi_playout_resampled(fs: &FreeSwitch) {
     for chunk in tone.chunks(640) {
         conn.send_binary(chunk.to_vec());
     }
-    tokio::time::sleep(Duration::from_millis(2600)).await;
+    time::sleep(Duration::from_millis(2600)).await;
     let played = call.recorded_b(&recording).await;
     let hz = frequency(&played, 8000);
     assert!((950.0..1050.0).contains(&hz), "played at {hz} Hz");
@@ -331,7 +332,7 @@ async fn kill_audio(fs: &FreeSwitch) {
     .await;
     let conn = server.accept().await;
     send_counter(&conn, 8000, 5);
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    time::sleep(Duration::from_millis(1000)).await;
     let interrupted = |fs: &FreeSwitch| {
         fs.events_all(&call.a).iter().any(|e| {
             e.subclass == "CHANNEL_EXECUTE_COMPLETE" && e.application.as_deref() == Some("playback")
@@ -343,7 +344,7 @@ async fn kill_audio(fs: &FreeSwitch) {
     // the endless silence leg A plays can only complete when it is interrupted
     fs.event(&call.a, "", "CHANNEL_EXECUTE_COMPLETE").await;
     assert!(interrupted(fs), "playback not interrupted");
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    time::sleep(Duration::from_millis(1000)).await;
     let played = assert_counter(&call.recorded_b(&recording).await);
     assert!(
         played < 8000 * 2,
@@ -368,7 +369,7 @@ async fn playback_mode(fs: &FreeSwitch) {
     let mut conn = server.accept().await;
     send_counter(&conn, 8000, 2);
     assert_eq!(conn.next().await, Some(Frame::Text("{}".to_string())));
-    let sent = tokio::time::timeout(Duration::from_millis(2500), conn.next()).await;
+    let sent = time::timeout(Duration::from_millis(2500), conn.next()).await;
     assert!(sent.is_err(), "the server got {sent:?}");
     assert!(assert_counter(&call.recorded_b(&recording).await) >= 8000 * 3 / 2);
     call.fork("stop po").await;
@@ -391,7 +392,7 @@ async fn hangup_races(fs: &FreeSwitch) {
         call.fork(&format!("start {} mono 8k race", sink.url("/")))
             .await;
         if i % 2 == 0 {
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            time::sleep(Duration::from_millis(30)).await;
         }
         call.hangup().await;
 
@@ -420,7 +421,7 @@ async fn all_closed(sink: &Sink) {
         if sink.open() == 0 {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(100)).await;
     }
     panic!(
         "{} of {} connections left open",
@@ -501,7 +502,7 @@ async fn panic_containment(fs: &FreeSwitch) {
         if !two.bugs().await.contains("p2") {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(100)).await;
     }
     assert!(
         !two.bugs().await.contains("p2"),

@@ -9,6 +9,7 @@ use std::time::Duration;
 use audio_fork::fork::{Event, MAX_TEXT_LEN, MediaSide, TextError, Timeouts};
 use common::{FRAME, start, start_with};
 use test_server::{Frame, Server};
+use tokio::time;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn metadata_then_queued_texts_then_audio() {
@@ -124,14 +125,14 @@ async fn stalled_server_overruns_once() {
             break;
         }
         if i % 50 == 0 {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            time::sleep(Duration::from_millis(1)).await;
         }
     }
     host.wait_for(|e| *e == Event::BufferOverrun).await;
     for _ in 0..1000 {
         media.on_read(&FRAME);
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    time::sleep(Duration::from_millis(100)).await;
     let overruns = host
         .events()
         .iter()
@@ -151,7 +152,7 @@ async fn dropped_connection_fires_disconnect() {
     host.wait_for(|e| *e == Event::Disconnect(None)).await;
     media.on_read(&FRAME);
     assert_eq!(handle.send_text("x".to_string()), Err(TextError::NotOpen));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    time::sleep(Duration::from_millis(100)).await;
     assert_eq!(host.events(), vec![Event::Connect, Event::Disconnect(None)]);
     media.close();
 }
@@ -189,7 +190,7 @@ async fn stop_while_connecting_sends_nothing() {
     if let Some(mut conn) = pending.try_accept().await {
         assert_eq!(conn.next().await, None);
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    time::sleep(Duration::from_millis(100)).await;
     assert_eq!(host.events(), vec![]);
 }
 
@@ -203,7 +204,7 @@ async fn stop_during_the_handshake_sends_nothing_before_close() {
     let mut conn = pending.accept().await;
     assert_eq!(conn.next().await, Some(Frame::Close));
     media.close();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    time::sleep(Duration::from_millis(100)).await;
     assert_eq!(host.events(), vec![]);
 }
 
@@ -218,7 +219,7 @@ async fn hangup_during_connect_cancels_without_events() {
     let (media, _handle, host) = start(&server.url("/"), None, timeouts);
     let _held = server.pending().await;
     media.close();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    time::sleep(Duration::from_millis(300)).await;
     assert_eq!(host.events(), vec![]);
 }
 
@@ -324,7 +325,7 @@ async fn next_played(media: &mut MediaSide) -> [i16; 160] {
         if frame.iter().any(|&s| s != 0) {
             return frame;
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        time::sleep(Duration::from_millis(5)).await;
     }
     panic!("nothing played");
 }

@@ -16,6 +16,7 @@ use freeswitch_esl_tokio::{EslClient, EslEventStream, EventFormat};
 use futures_util::FutureExt;
 use tokio::process::{Child, Command};
 use tokio::sync::Notify;
+use tokio::time;
 
 /// Which build of the module a run loads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,7 +256,7 @@ impl FreeSwitch {
                 fired.await;
             }
         };
-        tokio::time::timeout(Duration::from_secs(10), wait)
+        time::timeout(Duration::from_secs(10), wait)
             .await
             .unwrap_or_else(|_| {
                 panic!(
@@ -286,9 +287,8 @@ impl FreeSwitch {
     /// Shuts FreeSWITCH down and fails if it crashed or logged a CRIT line.
     pub async fn stop(mut self) {
         // the reply may never come: the socket closes during shutdown
-        let _ =
-            tokio::time::timeout(Duration::from_secs(2), self.client.api("fsctl shutdown")).await;
-        let status = tokio::time::timeout(Duration::from_secs(30), self.child.wait())
+        let _ = time::timeout(Duration::from_secs(2), self.client.api("fsctl shutdown")).await;
+        let status = time::timeout(Duration::from_secs(30), self.child.wait())
             .await
             .expect("freeswitch did not exit within 30 s")
             .unwrap();
@@ -378,7 +378,7 @@ impl Call<'_> {
             .api_ok(&format!("uuid_record {} stop {}", self.b, file.display()))
             .await;
         // the recording thread closes the file after the bug is gone
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        time::sleep(Duration::from_millis(200)).await;
         audio::samples(&fs::read(file).unwrap())
     }
 
@@ -537,7 +537,7 @@ async fn connect_esl(child: &mut Child) -> (EslClient, EslEventStream) {
         if let Ok(conn) = EslClient::connect("127.0.0.1", 8021, "ClueCon").await {
             return conn;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(100)).await;
     }
     panic!("no ESL connection within 30 s");
 }
