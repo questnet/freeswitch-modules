@@ -18,11 +18,13 @@ prereqs:
 test: prereqs
     docker build {{build_flags}} --target rust --tag {{image}}-rust --build-arg FS_VERSION={{fs_version}} .
 
-# Real-FreeSWITCH scenarios against the Rust and the C module; `just test-fs <filter>` runs a subset
+# Real-FreeSWITCH scenarios against the Rust and the C module, and the panic scenarios against the
+# test-hooks build; `just test-fs <filter>` runs a subset
 test-fs filter="": prereqs
     docker build {{build_flags}} --target fs-test --tag {{image}}-fs-test --build-arg FS_VERSION={{fs_version}} --build-arg LWS_VERSION={{lws_version}} .
     docker run --rm -e AUDIO_FORK_MODULE=rust {{image}}-fs-test fs_tests {{filter}}
     docker run --rm -e AUDIO_FORK_MODULE=c {{image}}-fs-test fs_tests {{filter}}
+    docker run --rm -e AUDIO_FORK_MODULE=rust-hooks {{image}}-fs-test fs_tests {{filter}}
 
 # Rebuild from scratch, ignoring the Docker cache
 rebuild: prereqs

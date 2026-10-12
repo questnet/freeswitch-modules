@@ -26,6 +26,8 @@ use tokio::{
 pub enum Variant {
     Rust,
     C,
+    /// The Rust module built with `test-hooks`; runs only the scenarios that need them.
+    RustHooks,
 }
 
 impl Variant {
@@ -33,7 +35,8 @@ impl Variant {
         match env::var("AUDIO_FORK_MODULE").as_deref() {
             Ok("rust") | Err(_) => Variant::Rust,
             Ok("c") => Variant::C,
-            Ok(other) => panic!("AUDIO_FORK_MODULE must be rust or c, not {other}"),
+            Ok("rust-hooks") => Variant::RustHooks,
+            Ok(other) => panic!("AUDIO_FORK_MODULE must be rust, c or rust-hooks, not {other}"),
         }
     }
 
@@ -41,6 +44,7 @@ impl Variant {
         match self {
             Variant::Rust => "rust",
             Variant::C => "c",
+            Variant::RustHooks => "rust-hooks",
         }
     }
 }
@@ -72,6 +76,7 @@ pub struct FreeSwitch {
     pub variant: Variant,
     pub client: EslClient,
     events: Arc<Events>,
+    allowed_crits: Mutex<Vec<String>>,
     /// Holds the generated audio files.
     files: PathBuf,
     child: Child,
@@ -170,6 +175,7 @@ impl FreeSwitch {
             variant,
             client,
             events,
+            allowed_crits: Mutex::new(Vec::new()),
             files,
             child,
             log_file,
@@ -195,10 +201,17 @@ impl FreeSwitch {
         resp.body().unwrap_or_default().to_string()
     }
 
+    /// A CRIT line containing `text` is expected (an injected panic) and does not fail the run.
+    pub fn allow_crit(&self, text: &str) {
+        self.allowed_crits.lock().unwrap().push(text.to_string());
+    }
+
     /// Whether the module under test shows this intended difference from the Rust module.
     pub fn shows(&self, exception: Exception) -> bool {
         match exception {
-            Exception::SilentRejection | Exception::NoReceiveLimit => self.variant == Variant::C,
+            Exception::SilentRejection | Exception::NoReceiveLimit | Exception::UncleanUnload => {
+                self.variant == Variant::C
+            }
         }
     }
 
@@ -279,7 +292,11 @@ impl FreeSwitch {
         if env::var_os("FS_TESTS_DUMP_LOG").is_some() {
             println!("---- freeswitch.log ----\n{log}---- end of freeswitch.log ----");
         }
-        let crits: Vec<&str> = log.lines().filter(|l| l.contains("[CRIT]")).collect();
+        let allowed = self.allowed_crits.lock().unwrap().clone();
+        let crits: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("[CRIT]") && !allowed.iter().any(|a| l.contains(a.as_str())))
+            .collect();
         assert!(status.success(), "freeswitch exited with {status}");
         assert!(
             crits.is_empty(),
@@ -297,6 +314,8 @@ pub enum Exception {
     SilentRejection,
     /// A text message over 1 MB is delivered (as one `json` event) instead of closing the connection.
     NoReceiveLimit,
+    /// Unloading with live forks leaves their bugs and sockets behind (the scenario is skipped).
+    UncleanUnload,
 }
 
 #[derive(Debug)]
@@ -549,9 +568,16 @@ impl Drop for TempDir {
 
 pub type Scenario = for<'a> fn(&'a FreeSwitch) -> Pin<Box<dyn Future<Output = ()> + 'a>>;
 
+/// Scenarios that need the `test-hooks` build run only against it, all others never.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Needs {
+    Any,
+    Hooks,
+}
+
 /// Runs the scenarios whose name contains the first command-line argument (all without one)
 /// against one FreeSWITCH, and exits non-zero if any failed or FreeSWITCH did not stop cleanly.
-pub fn run(scenarios: &[(&str, Scenario)]) {
+pub fn run(scenarios: &[(&str, Needs, Scenario)]) {
     let filter = env::args().nth(1).filter(|a| !a.starts_with('-'));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -561,8 +587,10 @@ pub fn run(scenarios: &[(&str, Scenario)]) {
         let variant = Variant::from_env();
         let fs = FreeSwitch::start(variant).await;
         let mut failed = Vec::new();
-        for (name, scenario) in scenarios {
-            if filter.as_deref().is_some_and(|f| !name.contains(f)) {
+        for (name, needs, scenario) in scenarios {
+            if filter.as_deref().is_some_and(|f| !name.contains(f))
+                || (*needs == Needs::Hooks) != (variant == Variant::RustHooks)
+            {
                 continue;
             }
             println!("scenario {name} ({variant:?}) ...");

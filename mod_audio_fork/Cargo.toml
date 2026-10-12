@@ -18,4 +18,4 @@ tracing-subscriber.workspace = true
 
 [features]
 # API subcommands that force panics, for the panic containment tests (T9); never in release images
-test-hooks = []
+test-hooks = ["audio_fork/test-hooks"]

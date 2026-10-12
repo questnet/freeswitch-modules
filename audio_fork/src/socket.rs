@@ -48,14 +48,23 @@ pub(crate) async fn run(
     mut inbound: Option<Inbound>,
 ) {
     let id = &shared.id;
-    let connected = tokio::time::timeout(config.timeouts.connect, connect(&config.url)).await;
+    let connected = tokio::select! {
+        biased;
+        _ = shared.closed.cancelled() => {
+            // hung up or stopped while connecting: the connection attempt is dropped, nothing is sent
+            tracing::debug!(session = %id.session, "{id}: closed while connecting");
+            shared.outbox.lock().unwrap().phase = Phase::Ended;
+            return;
+        }
+        connected = tokio::time::timeout(config.timeouts.connect, connect(&config.url)) => connected,
+    };
     let mut socket = match connected {
         Ok(Ok(socket)) => socket,
         Ok(Err(e)) => return connect_failed(&shared, &*host, e.to_string()),
         Err(_) => return connect_failed(&shared, &*host, "connect timed out".to_string()),
     };
     if shared.closed.is_cancelled() {
-        // stopped or hung up while connecting: nothing is sent, not even the queued texts
+        // closed just as the handshake completed: nothing is sent, not even the queued texts
         tracing::debug!(session = %id.session, "{id}: closed while connecting");
         shared.outbox.lock().unwrap().phase = Phase::Ended;
         let _ = tokio::time::timeout(config.timeouts.close, socket.close(None)).await;
@@ -64,7 +73,7 @@ pub(crate) async fn run(
     shared.outbox.lock().unwrap().phase = Phase::Open;
     shared.streaming.store(true, Ordering::Release);
     tracing::info!(session = %id.session, "{id}: connected to {}", config.url);
-    host.fire(id, Event::Connect);
+    shared.fire(&*host, Event::Connect);
 
     let end = stream(&mut socket, &shared, &*host, &mut capture, &mut inbound).await;
     shared.streaming.store(false, Ordering::Release);
@@ -84,9 +93,7 @@ pub(crate) async fn run(
         End::Dropped(reason) => {
             shared.outbox.lock().unwrap().phase = Phase::Ended;
             tracing::info!(session = %id.session, "{id}: connection dropped: {reason}");
-            if !shared.closed.is_cancelled() {
-                host.fire(id, Event::Disconnect(None));
-            }
+            shared.fire(&*host, Event::Disconnect(None));
         }
     }
 }
@@ -109,9 +116,7 @@ fn connect_failed(shared: &Shared, host: &dyn Host, reason: String) {
     let id = &shared.id;
     shared.outbox.lock().unwrap().phase = Phase::Ended;
     tracing::info!(session = %id.session, "{id}: connection failed: {reason}");
-    if !shared.closed.is_cancelled() {
-        host.fire(id, Event::ConnectFailed { reason });
-    }
+    shared.fire(host, Event::ConnectFailed { reason });
 }
 
 /// Sends texts (in order, before any audio queued after them) and capture audio until CLOSE or the connection ends.
@@ -144,7 +149,12 @@ async fn stream(
         tokio::select! {
             biased;
             _ = shared.closed.cancelled() => return End::Closed,
-            _ = shared.wake.notified() => {}
+            _ = shared.wake.notified() => {
+                #[cfg(feature = "test-hooks")]
+                if shared.inject.task.swap(false, Ordering::AcqRel) {
+                    panic!("injected in the socket task");
+                }
+            }
             message = socket.next() => match message {
                 Some(Ok(Message::Close(frame))) => return End::Dropped(format!("closed by the server: {frame:?}")),
                 Some(Ok(message)) => receive(shared, host, inbound, message),
@@ -168,9 +178,9 @@ fn receive(shared: &Shared, host: &dyn Host, inbound: &mut Option<Inbound>, mess
     let id = &shared.id;
     match message {
         Message::Text(text) => match parse(&text) {
-            Request::Fire(event) => host.fire(id, event),
+            Request::Fire(event) => shared.fire(host, event),
             Request::KillAudio => {
-                host.fire(id, Event::KillAudio);
+                shared.fire(host, Event::KillAudio);
                 host.break_playback(&id.session);
                 if let Some(playout) = &shared.playout {
                     playout.clear();

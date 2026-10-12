@@ -34,17 +34,23 @@ pub use sys::switch_status_t::{
 /// Runs an `extern "C"` entry point's body, turning a panic into a CRIT log line and `on_panic`.
 /// A panic must not unwind into FreeSWITCH (it would abort the whole process, D4).
 pub fn guard<T>(what: &str, on_panic: T, f: impl FnOnce() -> T) -> T {
+    guard_with(what, |_| on_panic, f)
+}
+
+/// [`guard`] whose fallback gets the panic message.
+pub fn guard_with<T>(what: &str, on_panic: impl FnOnce(&str) -> T, f: impl FnOnce() -> T) -> T {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(payload) => {
+            let message = panic_message(&*payload);
             log(
                 LOG_CRIT,
                 None,
                 file!(),
                 line!(),
-                &format!("panic in {what}: {}", panic_message(&*payload)),
+                &format!("panic in {what}: {message}"),
             );
-            on_panic
+            on_panic(message)
         }
     }
 }

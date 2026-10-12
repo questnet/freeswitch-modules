@@ -26,6 +26,15 @@ impl Host for FsHost {
             session.set_break();
         }
     }
+
+    fn end(&self, fork: &ForkId) {
+        let Some(session) = Session::locate(&fork.session) else {
+            return;
+        };
+        if let Some(bug) = crate::bug_of(fork) {
+            session.remove_media_bug(bug);
+        }
+    }
 }
 
 #[derive(Debug)]

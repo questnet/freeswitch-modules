@@ -17,6 +17,14 @@ tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 tokio-util.workspace = true
 tracing.workspace = true
 
+[features]
+# injected panics for the containment tests (T9); never in release images
+test-hooks = []
+
+[[test]]
+name = "panics"
+required-features = ["test-hooks"]
+
 [dev-dependencies]
 test_server.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

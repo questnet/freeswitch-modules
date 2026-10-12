@@ -2,7 +2,14 @@
 //! handshake, so it can accept, delay or refuse it, and then records what the client sends and
 //! does what the test tells it (send, stall, close, drop the TCP connection).
 
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
@@ -103,8 +110,88 @@ impl Pending {
         }
     }
 
+    /// Like [`Pending::accept`], but `None` when the client gave up during the handshake.
+    #[allow(clippy::result_large_err)]
+    pub async fn try_accept(self) -> Option<Conn> {
+        let callback = |_: &Request, response: Response| Ok(response);
+        let ws = tokio_tungstenite::accept_hdr_async(self.stream, callback)
+            .await
+            .ok()?;
+        let (frames_tx, frames) = mpsc::unbounded_channel();
+        let (commands, commands_rx) = mpsc::unbounded_channel();
+        tokio::spawn(serve(ws, frames_tx, commands_rx));
+        Some(Conn {
+            protocol: None,
+            path: String::new(),
+            frames,
+            commands,
+        })
+    }
+
     /// Closes the TCP connection without a handshake.
     pub fn refuse(self) {}
+}
+
+/// A server that accepts every connection (after `handshake_delay`), discards what it receives
+/// and counts the connections still open, for the hangup races and the load tier.
+#[derive(Debug, Clone)]
+pub struct Sink {
+    addr: SocketAddr,
+    open: Arc<AtomicUsize>,
+    accepted: Arc<AtomicUsize>,
+}
+
+impl Sink {
+    pub async fn start(handshake_delay: Duration) -> Sink {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sink = Sink {
+            addr: listener.local_addr().unwrap(),
+            open: Arc::default(),
+            accepted: Arc::default(),
+        };
+        let counters = sink.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(counters.clone().drain(stream, handshake_delay));
+            }
+        });
+        sink
+    }
+
+    // the callback's error type is tungstenite's
+    #[allow(clippy::result_large_err)]
+    async fn drain(self, stream: TcpStream, handshake_delay: Duration) {
+        tokio::time::sleep(handshake_delay).await;
+        let callback = |request: &Request, mut response: Response| {
+            if let Some(p) = request.headers().get("Sec-WebSocket-Protocol") {
+                response
+                    .headers_mut()
+                    .insert("Sec-WebSocket-Protocol", p.clone());
+            }
+            Ok(response)
+        };
+        // the client may have given up during the delay
+        let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, callback).await else {
+            return;
+        };
+        self.accepted.fetch_add(1, Ordering::SeqCst);
+        self.open.fetch_add(1, Ordering::SeqCst);
+        while let Some(Ok(_)) = ws.next().await {}
+        self.open.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("ws://{}{path}", self.addr)
+    }
+
+    /// Connections whose handshake completed and that the client has not closed yet.
+    pub fn open(&self) -> usize {
+        self.open.load(Ordering::SeqCst)
+    }
+
+    pub fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
 }
 
 /// What the client sent, in order.

@@ -21,7 +21,14 @@ pub unsafe extern "C" fn callback(
 ) -> sys::switch_bool_t::Type {
     let data = user_data as *mut BugData;
     // FALSE makes FreeSWITCH prune the bug, so a panicking fork ends through CLOSE like any other
-    freeswitch::guard("media bug callback", FALSE, || match abc {
+    let failed = |message: &str| {
+        // the media side is left as the panic left it, but its handle to the host is untouched
+        if abc != ABC_CLOSE {
+            unsafe { &*data }.media.panicked(message);
+        }
+        FALSE
+    };
+    freeswitch::guard_with("media bug callback", failed, || match abc {
         ABC_READ => {
             let data = unsafe { &mut *data };
             unsafe { MediaBug::from_raw(bug) }.read_frames(|samples| data.media.on_read(samples));

@@ -6,6 +6,7 @@
 //! [`Host`], keyed by session UUID, so a hung-up call simply makes those calls no-ops.
 
 use std::{
+    any::Any,
     collections::VecDeque,
     ffi::CStr,
     fmt,
@@ -17,7 +18,7 @@ use std::{
 };
 
 use rtrb::{Producer, RingBuffer};
-use tokio::{runtime::Handle, sync::Notify};
+use tokio::{runtime::Handle, sync::Notify, task::JoinHandle};
 use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_util::sync::CancellationToken;
 
@@ -103,6 +104,8 @@ pub trait Host: Send + Sync + 'static {
     fn fire(&self, fork: &ForkId, event: Event);
     /// Interrupts whatever the channel is playing (`CF_BREAK`).
     fn break_playback(&self, session: &str);
+    /// Removes the fork's bug after its task died; CLOSE follows as for a `stop`.
+    fn end(&self, fork: &ForkId);
 }
 
 /// Converts interleaved samples between two rates; implemented by the host (testing T13).
@@ -191,6 +194,40 @@ pub(crate) struct Shared {
     pub closed: CancellationToken,
     /// Present when server audio is played to the caller.
     pub playout: Option<Playout>,
+    #[cfg(feature = "test-hooks")]
+    pub inject: Inject,
+}
+
+impl Shared {
+    /// Fires unless CLOSE ran. Under the outbox lock, which CLOSE takes too, so no event can follow it.
+    pub fn fire(&self, host: &dyn Host, event: Event) {
+        let outbox = self.outbox.lock().unwrap();
+        if !outbox.closed {
+            host.fire(&self.id, event);
+        }
+        drop(outbox);
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.outbox.lock().unwrap().closed
+    }
+}
+
+/// Panics to inject for the containment tests (testing T9).
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Default)]
+pub(crate) struct Inject {
+    pub media: AtomicBool,
+    pub task: AtomicBool,
+}
+
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanicIn {
+    /// The next captured frame.
+    Media,
+    /// The socket task, when it next wakes.
+    Task,
 }
 
 #[derive(Debug, Default)]
@@ -200,6 +237,8 @@ pub(crate) struct Outbox {
     pub bytes: usize,
     /// No more texts are accepted: `stop` was called or CLOSE ran.
     pub closing: bool,
+    /// CLOSE ran: the fork fires no more events.
+    pub closed: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +291,8 @@ impl Fork {
             streaming: AtomicBool::new(false),
             closed: CancellationToken::new(),
             playout: config.playout_rate.map(|_| Playout::default()),
+            #[cfg(feature = "test-hooks")]
+            inject: Inject::default(),
         });
         let inbound = config.playout_rate.map(|rate| socket::Inbound {
             prebuffer: Prebuffer::new(rate, config.codec_rate),
@@ -259,13 +300,14 @@ impl Fork {
         });
         let capacity = config.rate as usize * config.channels * CAPTURE_BUFFER_SECS;
         let (producer, consumer) = RingBuffer::new(capacity);
-        runtime.spawn(socket::run(
+        let task = runtime.spawn(socket::run(
             config,
             shared.clone(),
             host.clone(),
             consumer,
             inbound,
         ));
+        runtime.spawn(supervise(task, shared.clone(), host.clone()));
         let media = MediaSide {
             shared: shared.clone(),
             host,
@@ -277,6 +319,37 @@ impl Fork {
         };
         Ok((media, ForkHandle { shared }))
     }
+}
+
+/// A panic in the socket task ends that fork only (D4): logged at CRIT, `error` fired, bug removed.
+async fn supervise(task: JoinHandle<()>, shared: Arc<Shared>, host: Arc<dyn Host>) {
+    // the other way a task ends early is the runtime shutting down at unload
+    let Err(e) = task.await else { return };
+    if !e.is_panic() {
+        return;
+    }
+    let message = panic_message(e.into_panic());
+    let id = &shared.id;
+    tracing::error!(target: "panic", session = %id.session, "{id}: socket task panicked: {message}");
+    shared.fire(&*host, panic_event(&message));
+    if !shared.is_closed() {
+        host.end(id);
+    }
+}
+
+pub fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(s) => *s,
+        Err(payload) => payload
+            .downcast_ref::<&str>()
+            .map_or("(non-string panic payload)".to_string(), |s| s.to_string()),
+    }
+}
+
+fn panic_event(message: &str) -> Event {
+    Event::Error(Some(
+        serde_json::json!({ "reason": format!("panic: {message}") }).to_string(),
+    ))
 }
 
 /// The media thread's side of a fork; never blocks.
@@ -301,6 +374,10 @@ impl fmt::Debug for MediaSide {
 impl MediaSide {
     /// A captured frame at the codec rate, interleaved for stereo.
     pub fn on_read(&mut self, samples: &[i16]) {
+        #[cfg(feature = "test-hooks")]
+        if self.shared.inject.media.swap(false, Ordering::AcqRel) {
+            panic!("injected in the media callback");
+        }
         if !self.shared.streaming.load(Ordering::Acquire) {
             return;
         }
@@ -329,9 +406,15 @@ impl MediaSide {
         self.overrun_notified = true;
         tracing::error!(session = %self.shared.id.session, "{}: capture buffer full, dropping frames", self.shared.id);
         // fired from the runtime: the media thread does not call into the host
-        let (host, id) = (self.host.clone(), self.shared.id.clone());
+        let (host, shared) = (self.host.clone(), self.shared.clone());
         self.runtime
-            .spawn(async move { host.fire(&id, Event::BufferOverrun) });
+            .spawn(async move { shared.fire(&*host, Event::BufferOverrun) });
+    }
+
+    /// After a panic in the media callback, which then has FreeSWITCH remove the bug: fires `error`.
+    /// From the media thread itself, as the CLOSE that follows right away silences the fork.
+    pub fn panicked(&self, message: &str) {
+        self.shared.fire(&*self.host, panic_event(message));
     }
 
     /// Mixes server audio into a frame going to the caller; returns whether it changed the frame.
@@ -347,7 +430,10 @@ impl MediaSide {
 
     /// The bug's CLOSE: the task sends what is queued, closes the socket and ends.
     pub fn close(self) {
-        self.shared.outbox.lock().unwrap().closing = true;
+        let mut outbox = self.shared.outbox.lock().unwrap();
+        outbox.closing = true;
+        outbox.closed = true;
+        drop(outbox);
         self.shared.closed.cancel();
     }
 }
@@ -359,6 +445,16 @@ pub struct ForkHandle {
 }
 
 impl ForkHandle {
+    #[cfg(feature = "test-hooks")]
+    pub fn inject_panic(&self, place: PanicIn) {
+        let flag = match place {
+            PanicIn::Media => &self.shared.inject.media,
+            PanicIn::Task => &self.shared.inject.task,
+        };
+        flag.store(true, Ordering::Release);
+        self.shared.wake.notify_one();
+    }
+
     /// Queues one text frame; texts sent before the connection is open go out right after the metadata.
     pub fn send_text(&self, text: String) -> Result<(), TextError> {
         let mut outbox = self.shared.outbox.lock().unwrap();

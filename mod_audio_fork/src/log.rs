@@ -19,7 +19,9 @@ impl<S: Subscriber> Layer<S> for FreeswitchLog {
         let mut line = Line::default();
         event.record(&mut line);
         let meta = event.metadata();
+        // `panic` marks a contained panic, which FreeSWITCH has no level above ERROR for in tracing
         let level = match *meta.level() {
+            _ if meta.target() == "panic" => freeswitch::LOG_CRIT,
             Level::ERROR => freeswitch::LOG_ERROR,
             Level::WARN => freeswitch::LOG_WARNING,
             Level::INFO => freeswitch::LOG_INFO,

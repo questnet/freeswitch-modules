@@ -134,6 +134,10 @@ fn run_api(cmd: Option<&CStr>) -> String {
     let tokens = cmd
         .map(|c| freeswitch::separate_string(c, b' ', 10))
         .unwrap_or_default();
+    #[cfg(feature = "test-hooks")]
+    if let Some(reply) = test_hook(&tokens) {
+        return reply;
+    }
     let command = match api::parse(&tokens) {
         Ok(command) => command,
         Err(ParseError::Usage(reason)) => {
@@ -283,6 +287,46 @@ fn stop_fork(session: &Session, id: ForkId, text: Option<String>) -> Result<(), 
     // runs CLOSE, which takes the registry lock: none may be held here; false if a hangup got there first
     session.remove_media_bug(bug);
     Ok(())
+}
+
+/// The bug of a registered fork, once it is attached.
+fn bug_of(id: &ForkId) -> Option<MediaBug> {
+    FORKS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .get(id)
+        .and_then(|e| e.bug)
+}
+
+/// `<uuid> test_panic_media|test_panic_task <bugname>` (T9), only in test builds.
+#[cfg(feature = "test-hooks")]
+fn test_hook(tokens: &[String]) -> Option<String> {
+    use audio_fork::fork::PanicIn;
+    let [session, hook, bugname] = tokens else {
+        return None;
+    };
+    let place = match hook.as_str() {
+        "test_panic_media" => PanicIn::Media,
+        "test_panic_task" => PanicIn::Task,
+        _ => return None,
+    };
+    let id = fork_id(session, bugname.clone());
+    let handle = FORKS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .get(&id)
+        .map(|e| e.handle.clone());
+    Some(match handle {
+        Some(handle) => {
+            handle.inject_panic(place);
+            OK.to_string()
+        }
+        None => FAILED.to_string(),
+    })
 }
 
 fn send_text(id: ForkId, text: Option<String>) -> Result<(), String> {

@@ -3,24 +3,34 @@
 use std::time::Duration;
 
 use fs_tests::{
-    Exception, FreeSwitch, Scenario,
+    Exception, FreeSwitch, Needs, Scenario,
     audio::{assert_counter, channel, frequency, samples},
 };
-use test_server::{Frame, Server};
+use test_server::{Frame, Server, Sink};
+
+/// `(name, needs, scenario)` entries, named after their functions.
+macro_rules! scenarios {
+    ($($needs:ident $name:ident),* $(,)?) => {
+        &[$((stringify!($name), Needs::$needs, |fs| Box::pin($name(fs)))),*]
+    };
+}
 
 fn main() {
-    let scenarios: &[(&str, Scenario)] = &[
-        ("load_lifecycle", |fs| Box::pin(load_lifecycle(fs))),
-        ("start_rejections", |fs| Box::pin(start_rejections(fs))),
-        ("capture", |fs| Box::pin(capture(fs))),
-        ("two_forks", |fs| Box::pin(two_forks(fs))),
-        ("events", |fs| Box::pin(events(fs))),
-        ("inbound", |fs| Box::pin(inbound(fs))),
-        ("receive_limit", |fs| Box::pin(receive_limit(fs))),
-        ("bidi_playout", |fs| Box::pin(bidi_playout(fs))),
-        ("bidi_resampled", |fs| Box::pin(bidi_playout_resampled(fs))),
-        ("kill_audio", |fs| Box::pin(kill_audio(fs))),
-        ("playback_mode", |fs| Box::pin(playback_mode(fs))),
+    let scenarios: &[(&str, Needs, Scenario)] = scenarios![
+        Any load_lifecycle,
+        Any start_rejections,
+        Any capture,
+        Any two_forks,
+        Any events,
+        Any inbound,
+        Any receive_limit,
+        Any bidi_playout,
+        Any bidi_playout_resampled,
+        Any kill_audio,
+        Any playback_mode,
+        Any hangup_races,
+        Any unload_with_live_forks,
+        Hooks panic_containment,
     ];
     fs_tests::run(scenarios);
 }
@@ -373,4 +383,144 @@ async fn playback_mode(fs: &FreeSwitch) {
     assert!(assert_counter(&call.recorded_b(&recording).await) >= 8000 * 3 / 2);
     call.fork("stop po").await;
     call.hangup().await;
+}
+
+/// Waits until the server has no connection left open.
+async fn all_closed(sink: &Sink) {
+    for _ in 0..150 {
+        if sink.open() == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!(
+        "{} of {} connections left open",
+        sink.open(),
+        sink.accepted()
+    );
+}
+
+/// Hangup during the connect, during streaming, and a stop racing the hangup, 200 times each:
+/// FreeSWITCH stays up and no socket is left open.
+async fn hangup_races(fs: &FreeSwitch) {
+    let slow = Sink::start(Duration::from_millis(50)).await;
+    let sink = Sink::start(Duration::ZERO).await;
+    for i in 0..200 {
+        let call = fs.call(8000).await;
+        call.fork(&format!("start {} mono 8k race", slow.url("/")))
+            .await;
+        call.hangup().await;
+
+        let call = fs.call(8000).await;
+        call.play_counter().await;
+        call.fork(&format!("start {} mono 8k race", sink.url("/")))
+            .await;
+        if i % 2 == 0 {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        call.hangup().await;
+
+        let call = fs.call(8000).await;
+        call.fork(&format!("start {} mono 8k race", sink.url("/")))
+            .await;
+        fs.api(&format!("bgapi uuid_kill {}", call.a)).await;
+        // either the stop or the hangup gets there first
+        let reply = fs
+            .api(&format!("uuid_audio_fork {} stop race", call.a))
+            .await;
+        assert!(
+            reply.starts_with("+OK") || reply.starts_with("-ERR"),
+            "{reply}"
+        );
+    }
+    assert!(fs.api("status").await.contains("UP"));
+    all_closed(&slow).await;
+    all_closed(&sink).await;
+    assert!(sink.accepted() > 0);
+}
+
+/// Unloading with live forks removes their bugs and closes their sockets; the calls survive.
+async fn unload_with_live_forks(fs: &FreeSwitch) {
+    if fs.shows(Exception::UncleanUnload) {
+        return;
+    }
+    let sink = Sink::start(Duration::ZERO).await;
+    let one = fs.call(8000).await;
+    let two = fs.call(8000).await;
+    for call in [&one, &two] {
+        call.play_counter().await;
+        call.fork(&format!("start {} mono 8k live", sink.url("/")))
+            .await;
+        fs.event(&call.a, "live", "mod_audio_fork::connect").await;
+    }
+    assert_eq!(sink.open(), 2);
+    fs.api_ok("unload mod_audio_fork").await;
+    all_closed(&sink).await;
+    for call in [&one, &two] {
+        assert!(!call.bugs().await.contains("live"), "bug left after unload");
+    }
+    fs.api_ok("load mod_audio_fork").await;
+    one.fork(&format!("start {} mono 8k again", sink.url("/")))
+        .await;
+    fs.event(&one.a, "again", "mod_audio_fork::connect").await;
+    one.hangup().await;
+    two.hangup().await;
+    all_closed(&sink).await;
+}
+
+/// A panic in the media callback or the socket task ends that fork with `error`; another call
+/// keeps streaming without a gap.
+async fn panic_containment(fs: &FreeSwitch) {
+    fs.allow_crit("panic in media bug callback: injected in the media callback");
+    fs.allow_crit("socket task panicked: injected in the socket task");
+    let mut server = Server::start().await;
+    let one = fs.call(8000).await;
+    let two = fs.call(8000).await;
+    one.play_counter().await;
+    two.play_counter().await;
+    one.fork(&format!("start {} mono 8k p1", server.url("/one")))
+        .await;
+    let mut one_conn = server.accept().await;
+    two.fork(&format!("start {} mono 8k p2", server.url("/two")))
+        .await;
+    let mut two_conn = server.accept().await;
+    two_conn.audio(4000).await;
+
+    one.fork("test_panic_media p1").await;
+    let error = fs.event(&one.a, "p1", "mod_audio_fork::error").await;
+    assert!(
+        error
+            .body
+            .unwrap()
+            .contains("injected in the media callback")
+    );
+    loop {
+        match one_conn.next().await {
+            Some(Frame::Binary(_)) => {}
+            Some(Frame::Close) | None => break,
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(
+        !one.bugs().await.contains("p1"),
+        "bug left after the media panic"
+    );
+    assert_counter(&samples(&two_conn.audio(16000).await));
+
+    two.fork("test_panic_task p2").await;
+    let error = fs.event(&two.a, "p2", "mod_audio_fork::error").await;
+    assert!(error.body.unwrap().contains("injected in the socket task"));
+    for _ in 0..50 {
+        if !two.bugs().await.contains("p2") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !two.bugs().await.contains("p2"),
+        "bug left after the task panic"
+    );
+    assert!(fs.api("status").await.contains("UP"));
+    one.hangup().await;
+    two.hangup().await;
 }

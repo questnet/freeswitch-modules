@@ -70,8 +70,9 @@ ENV FREESWITCH_INCLUDE_DIR=/usr/local/freeswitch/include/freeswitch FREESWITCH_L
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/work/target set -eux; \
     cargo fmt --all --check; \
-    cargo clippy --workspace --all-targets --locked -- -D warnings; \
+    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings; \
     cargo test --locked; \
+    cargo test --locked -p audio_fork --features test-hooks --test panics; \
     mkdir -p /out/rust /out/rust-hooks; \
     cargo build --release --locked -p mod_audio_fork; \
     cp target/release/libmod_audio_fork.so /out/rust/mod_audio_fork.so; \

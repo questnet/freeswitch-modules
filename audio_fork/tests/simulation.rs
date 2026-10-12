@@ -2,97 +2,13 @@
 //! without FreeSWITCH. Frames are pushed by count; races are made deterministic by holding the
 //! server's handshake until the test releases it.
 
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+mod common;
 
-use audio_fork::fork::{
-    Config, Event, Fork, ForkHandle, ForkId, Host, MAX_TEXT_LEN, MediaSide, Resamplers, TextError,
-    Timeouts,
-};
+use std::time::Duration;
+
+use audio_fork::fork::{Event, MAX_TEXT_LEN, MediaSide, TextError, Timeouts};
+use common::{FRAME, start, start_with};
 use test_server::{Frame, Server};
-use tokio::{runtime::Handle, sync::Notify};
-
-/// 20 ms at 8 kHz.
-const FRAME: [i16; 160] = [7; 160];
-
-#[derive(Debug, Default)]
-struct FakeHost {
-    events: Mutex<Vec<Event>>,
-    breaks: Mutex<Vec<String>>,
-    fired: Notify,
-}
-
-impl Host for FakeHost {
-    fn fire(&self, _fork: &ForkId, event: Event) {
-        self.events.lock().unwrap().push(event);
-        self.fired.notify_waiters();
-    }
-
-    fn break_playback(&self, session: &str) {
-        self.breaks.lock().unwrap().push(session.to_string());
-    }
-}
-
-impl FakeHost {
-    fn events(&self) -> Vec<Event> {
-        self.events.lock().unwrap().clone()
-    }
-
-    async fn wait_for(&self, wanted: impl Fn(&Event) -> bool) -> Event {
-        let wait = async {
-            loop {
-                let fired = self.fired.notified();
-                if let Some(e) = self.events().into_iter().find(&wanted) {
-                    return e;
-                }
-                fired.await;
-            }
-        };
-        tokio::time::timeout(Duration::from_secs(10), wait)
-            .await
-            .unwrap_or_else(|_| panic!("event not fired; got {:?}", self.events()))
-    }
-}
-
-fn start(
-    url: &str,
-    metadata: Option<&str>,
-    timeouts: Timeouts,
-) -> (MediaSide, ForkHandle, Arc<FakeHost>) {
-    start_with(url, metadata, None, timeouts)
-}
-
-fn start_with(
-    url: &str,
-    metadata: Option<&str>,
-    playout_rate: Option<u32>,
-    timeouts: Timeouts,
-) -> (MediaSide, ForkHandle, Arc<FakeHost>) {
-    let host = Arc::new(FakeHost::default());
-    let config = Config {
-        id: ForkId {
-            session: "session".to_string(),
-            bugname: "bug".to_string(),
-        },
-        url: url.parse().unwrap(),
-        channels: 1,
-        codec_rate: 8000,
-        rate: 8000,
-        metadata: metadata.map(str::to_string),
-        playout_rate,
-        timeouts,
-    };
-    let (media, handle) = Fork::start(
-        config,
-        host.clone(),
-        Resamplers::default(),
-        &Handle::current(),
-    )
-    .unwrap();
-    (media, handle, host)
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn metadata_then_queued_texts_then_audio() {
@@ -269,9 +185,22 @@ async fn stop_while_connecting_sends_nothing() {
     media.on_read(&FRAME);
     handle.stop(Some("final".to_string()));
     media.close();
-    let mut conn = pending.accept().await;
-    assert_eq!(conn.next().await, Some(Frame::Close));
-    assert_eq!(conn.next().await, None);
+    // the connection attempt is dropped: the handshake fails, or the connection ends at once
+    if let Some(mut conn) = pending.try_accept().await {
+        assert_eq!(conn.next().await, None);
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(host.events(), vec![]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hangup_during_connect_cancels_without_events() {
+    let mut server = Server::start().await;
+    let (media, _handle, host) = start(&server.url("/"), None, Timeouts::default());
+    let _held = server.pending().await;
+    media.close();
+    // the connect timeout would fire a connect_failed if the task were still waiting
+    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(host.events(), vec![]);
 }
 
