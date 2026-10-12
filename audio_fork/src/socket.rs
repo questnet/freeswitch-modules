@@ -16,7 +16,10 @@ use tokio_tungstenite::{
     },
 };
 
-use crate::fork::{Config, Event, Host, MAX_TEXT_LEN, Phase, Shared};
+use crate::{
+    fork::{Config, Event, Host, MAX_TEXT_LEN, Phase, Resample, Shared},
+    playout::Prebuffer,
+};
 
 const SUBPROTOCOL: &str = "audio.drachtio.org";
 
@@ -31,11 +34,18 @@ enum End {
     Dropped(String),
 }
 
+/// The task's half of playout: inbound audio is collected, resampled to the codec rate and handed to [`Shared::playout`].
+pub(crate) struct Inbound {
+    pub prebuffer: Prebuffer,
+    pub resampler: Option<Box<dyn Resample>>,
+}
+
 pub(crate) async fn run(
     config: Config,
     shared: Arc<Shared>,
     host: Arc<dyn Host>,
     mut capture: Consumer<i16>,
+    mut inbound: Option<Inbound>,
 ) {
     let id = &shared.id;
     let connected = tokio::time::timeout(config.timeouts.connect, connect(&config.url)).await;
@@ -56,7 +66,7 @@ pub(crate) async fn run(
     tracing::info!(session = %id.session, "{id}: connected to {}", config.url);
     host.fire(id, Event::Connect);
 
-    let end = stream(&mut socket, &shared, &*host, &mut capture).await;
+    let end = stream(&mut socket, &shared, &*host, &mut capture, &mut inbound).await;
     shared.streaming.store(false, Ordering::Release);
     match end {
         End::Closed => {
@@ -110,6 +120,7 @@ async fn stream(
     shared: &Shared,
     host: &dyn Host,
     capture: &mut Consumer<i16>,
+    inbound: &mut Option<Inbound>,
 ) -> End {
     loop {
         loop {
@@ -136,7 +147,7 @@ async fn stream(
             _ = shared.wake.notified() => {}
             message = socket.next() => match message {
                 Some(Ok(Message::Close(frame))) => return End::Dropped(format!("closed by the server: {frame:?}")),
-                Some(Ok(message)) => receive(shared, host, message),
+                Some(Ok(message)) => receive(shared, host, inbound, message),
                 Some(Err(e)) => return End::Dropped(e.to_string()),
                 None => return End::Dropped("connection closed".to_string()),
             },
@@ -153,22 +164,39 @@ async fn send(socket: &mut Socket, shared: &Shared, message: Message) -> Result<
     }
 }
 
-fn receive(shared: &Shared, host: &dyn Host, message: Message) {
+fn receive(shared: &Shared, host: &dyn Host, inbound: &mut Option<Inbound>, message: Message) {
     let id = &shared.id;
     match message {
-        Message::Text(text) => match inbound(&text) {
-            Inbound::Fire(event) => host.fire(id, event),
-            Inbound::KillAudio => {
+        Message::Text(text) => match parse(&text) {
+            Request::Fire(event) => host.fire(id, event),
+            Request::KillAudio => {
                 host.fire(id, Event::KillAudio);
                 host.break_playback(&id.session);
+                if let Some(playout) = &shared.playout {
+                    playout.clear();
+                }
             }
-            Inbound::Ignored(why) => {
+            Request::Ignored(why) => {
                 tracing::info!(session = %id.session, "{id}: ignoring message: {why}")
             }
         },
-        Message::Binary(bytes) => {
-            tracing::debug!(session = %id.session, "{id}: ignoring {} bytes of audio without playout", bytes.len())
-        }
+        Message::Binary(bytes) => match (inbound, &shared.playout) {
+            (Some(inbound), Some(playout)) => {
+                if let Some(samples) = inbound.prebuffer.push(&bytes) {
+                    match &mut inbound.resampler {
+                        Some(resampler) => {
+                            let mut resampled = Vec::with_capacity(samples.len());
+                            resampler.process(&samples, &mut resampled);
+                            playout.append(&resampled);
+                        }
+                        None => playout.append(&samples),
+                    }
+                }
+            }
+            _ => {
+                tracing::debug!(session = %id.session, "{id}: ignoring {} bytes of audio without playout", bytes.len())
+            }
+        },
         // pings are answered by tungstenite; close frames end the stream before they get here
         _ => {}
     }
@@ -176,16 +204,16 @@ fn receive(shared: &Shared, host: &dyn Host, message: Message) {
 
 /// What a server text message asks for.
 #[derive(Debug, PartialEq, Eq)]
-enum Inbound {
+enum Request {
     Fire(Event),
     KillAudio,
     Ignored(String),
 }
 
 /// JSON with a `type`; one without counts as `json`, as in the C module.
-fn inbound(text: &str) -> Inbound {
+fn parse(text: &str) -> Request {
     let Ok(message) = serde_json::from_str::<serde_json::Value>(text) else {
-        return Inbound::Ignored("not JSON".to_string());
+        return Request::Ignored("not JSON".to_string());
     };
     let data = || message.get("data").map(|d| d.to_string());
     match message
@@ -193,11 +221,11 @@ fn inbound(text: &str) -> Inbound {
         .and_then(|t| t.as_str())
         .unwrap_or("json")
     {
-        "killAudio" => Inbound::KillAudio,
-        "disconnect" => Inbound::Fire(Event::Disconnect(data())),
-        "error" => Inbound::Fire(Event::Error(data())),
-        "json" => Inbound::Fire(Event::Json(message.to_string())),
-        other => Inbound::Ignored(format!("unsupported type {other}")),
+        "killAudio" => Request::KillAudio,
+        "disconnect" => Request::Fire(Event::Disconnect(data())),
+        "error" => Request::Fire(Event::Error(data())),
+        "json" => Request::Fire(Event::Json(message.to_string())),
+        other => Request::Ignored(format!("unsupported type {other}")),
     }
 }
 

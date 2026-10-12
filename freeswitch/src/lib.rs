@@ -395,6 +395,25 @@ impl MediaBug {
     }
 }
 
+impl MediaBug {
+    /// Lets `mix` change the frame going to the caller; it is written back only if `mix` says it changed it.
+    /// Only from the bug's WRITE_REPLACE callback.
+    pub fn replace_write_frame(&self, mix: impl FnOnce(&mut [i16]) -> bool) {
+        unsafe {
+            let frame = sys::switch_core_media_bug_get_write_replace_frame(self.0);
+            let samples = std::slice::from_raw_parts_mut(
+                (*frame).data as *mut i16,
+                (*frame).samples as usize,
+            );
+            if mix(samples) {
+                (*frame).channels = 1;
+                (*frame).datalen = (*frame).samples * 2;
+                sys::switch_core_media_bug_set_write_replace_frame(self.0, frame);
+            }
+        }
+    }
+}
+
 /// FreeSWITCH's speex resampler for interleaved 16 bit audio (D8).
 #[derive(Debug)]
 pub struct Resampler {

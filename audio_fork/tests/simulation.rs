@@ -8,7 +8,8 @@ use std::{
 };
 
 use audio_fork::fork::{
-    Config, Event, Fork, ForkHandle, ForkId, Host, MAX_TEXT_LEN, MediaSide, TextError, Timeouts,
+    Config, Event, Fork, ForkHandle, ForkId, Host, MAX_TEXT_LEN, MediaSide, Resamplers, TextError,
+    Timeouts,
 };
 use test_server::{Frame, Server};
 use tokio::{runtime::Handle, sync::Notify};
@@ -60,6 +61,15 @@ fn start(
     metadata: Option<&str>,
     timeouts: Timeouts,
 ) -> (MediaSide, ForkHandle, Arc<FakeHost>) {
+    start_with(url, metadata, None, timeouts)
+}
+
+fn start_with(
+    url: &str,
+    metadata: Option<&str>,
+    playout_rate: Option<u32>,
+    timeouts: Timeouts,
+) -> (MediaSide, ForkHandle, Arc<FakeHost>) {
     let host = Arc::new(FakeHost::default());
     let config = Config {
         id: ForkId {
@@ -71,9 +81,16 @@ fn start(
         codec_rate: 8000,
         rate: 8000,
         metadata: metadata.map(str::to_string),
+        playout_rate,
         timeouts,
     };
-    let (media, handle) = Fork::start(config, host.clone(), None, &Handle::current()).unwrap();
+    let (media, handle) = Fork::start(
+        config,
+        host.clone(),
+        Resamplers::default(),
+        &Handle::current(),
+    )
+    .unwrap();
     (media, handle, host)
 }
 
@@ -304,5 +321,67 @@ async fn message_over_the_receive_limit_disconnects() {
     ));
     host.wait_for(|e| *e == Event::Disconnect(None)).await;
     assert_eq!(host.events(), vec![Event::Connect, Event::Disconnect(None)]);
+    media.close();
+}
+
+fn le_bytes(samples: impl IntoIterator<Item = i16>) -> Vec<u8> {
+    samples.into_iter().flat_map(|s| s.to_le_bytes()).collect()
+}
+
+/// Polls the write-replace side, as the media thread does every 20 ms, until a frame carries audio.
+async fn next_played(media: &mut MediaSide) -> [i16; 160] {
+    for _ in 0..1000 {
+        let mut frame = [0; 160];
+        media.on_write_replace(&mut frame);
+        if frame.iter().any(|&s| s != 0) {
+            return frame;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("nothing played");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn binary_without_playout_is_ignored() {
+    let mut server = Server::start().await;
+    let (media, _handle, host) = start(&server.url("/"), None, Timeouts::default());
+    let conn = server.accept().await;
+    host.wait_for(|e| *e == Event::Connect).await;
+    conn.send_binary(le_bytes([1; 4000]));
+    conn.send_text(r#"{"type":"json"}"#);
+    host.wait_for(|e| matches!(e, Event::Json(_))).await;
+    media.close();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn playout_starts_after_the_prebuffer_and_kill_audio_discards_it() {
+    let mut server = Server::start().await;
+    let (mut media, _handle, host) =
+        start_with(&server.url("/"), None, Some(8000), Timeouts::default());
+    let conn = server.accept().await;
+    host.wait_for(|e| *e == Event::Connect).await;
+    // one sample short of the first threshold (320 * 4), split mid-sample
+    let first = le_bytes(1..=1279);
+    conn.send_binary(first[..1001].to_vec());
+    conn.send_binary(first[1001..].to_vec());
+    conn.send_text(r#"{"type":"json"}"#);
+    host.wait_for(|e| matches!(e, Event::Json(_))).await;
+    let mut frame = [0; 160];
+    media.on_write_replace(&mut frame);
+    assert_eq!(frame, [0; 160], "played before the prebuffer was full");
+
+    conn.send_binary(le_bytes(1280..=4000));
+    let played = next_played(&mut media).await;
+    assert_eq!(played.to_vec(), (1..=160).collect::<Vec<i16>>());
+
+    conn.send_text(r#"{"type":"killAudio"}"#);
+    host.wait_for(|e| *e == Event::KillAudio).await;
+    let mut frame = [0; 160];
+    assert!(
+        !media.on_write_replace(&mut frame),
+        "the clear leaves the frame alone"
+    );
+    media.on_write_replace(&mut frame);
+    assert_eq!(frame, [0; 160], "buffered audio played after killAudio");
     media.close();
 }

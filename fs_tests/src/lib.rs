@@ -158,7 +158,10 @@ impl FreeSwitch {
         let (client, stream) = connect_esl(&mut child).await;
         let subclasses = SUBCLASSES.join(" ");
         client
-            .subscribe_events_raw(EventFormat::Plain, &format!("CUSTOM {subclasses}"))
+            .subscribe_events_raw(
+                EventFormat::Plain,
+                &format!("CHANNEL_EXECUTE_COMPLETE CUSTOM {subclasses}"),
+            )
             .await
             .unwrap();
         let events = Arc::new(Events::default());
@@ -245,12 +248,21 @@ impl FreeSwitch {
             })
     }
 
-    /// The events of one session so far.
-    pub fn events_of(&self, session: &str) -> Vec<FsEvent> {
+    /// Every collected event of one session so far.
+    pub fn events_all(&self, session: &str) -> Vec<FsEvent> {
         self.events
             .all()
             .into_iter()
             .filter(|e| e.session == session)
+            .collect()
+    }
+
+    /// The `mod_audio_fork::*` events of one session so far.
+    pub fn events_of(&self, session: &str) -> Vec<FsEvent> {
+        self.events
+            .all()
+            .into_iter()
+            .filter(|e| e.session == session && e.subclass.starts_with("mod_audio_fork::"))
             .collect()
     }
 
@@ -328,6 +340,31 @@ impl Call<'_> {
             .await;
     }
 
+    /// Starts recording what leg B hears, which is what leg A sends.
+    pub async fn record_b(&self) -> PathBuf {
+        let file = self
+            .fs
+            .files
+            .join(format!("{}.r{}", self.b, self.rate / 1000));
+        self.fs
+            .api_ok(&format!("uuid_setvar {} RECORD_READ_ONLY true", self.b))
+            .await;
+        self.fs
+            .api_ok(&format!("uuid_record {} start {}", self.b, file.display()))
+            .await;
+        file
+    }
+
+    /// Stops the recording and returns its samples.
+    pub async fn recorded_b(&self, file: &Path) -> Vec<i16> {
+        self.fs
+            .api_ok(&format!("uuid_record {} stop {}", self.b, file.display()))
+            .await;
+        // the recording thread closes the file after the bug is gone
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        audio::samples(&fs::read(file).unwrap())
+    }
+
     /// Leg B plays a sine tone.
     pub async fn play_tone(&self, hz: u32) {
         self.fs
@@ -351,7 +388,10 @@ impl Call<'_> {
 /// A `mod_audio_fork::*` event as received over ESL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsEvent {
+    /// The subclass of a custom event, otherwise the event name.
     pub subclass: String,
+    /// Of `CHANNEL_EXECUTE_COMPLETE`.
+    pub application: Option<String>,
     pub bugname: String,
     /// `Unique-ID`, from the channel data.
     pub session: String,
@@ -384,11 +424,12 @@ impl Events {
 async fn collect(mut stream: EslEventStream, events: Arc<Events>) {
     while let Some(Ok(event)) = stream.recv().await {
         let header = |name: &str| event.header_str(name).map(str::to_string);
-        let Some(subclass) = header("Event-Subclass") else {
+        let Some(subclass) = header("Event-Subclass").or_else(|| header("Event-Name")) else {
             continue;
         };
         events.received.lock().unwrap().push(FsEvent {
             subclass,
+            application: header("Application"),
             bugname: header("Audio-Fork-Bugname").unwrap_or_default(),
             session: header("Unique-ID").unwrap_or_default(),
             channel_name: header("Channel-Name"),
@@ -430,8 +471,8 @@ pub mod audio {
     /// From where the counter starts, every sample is one more than the one before: nothing was
     /// dropped, repeated or reordered. Samples of -1 are skipped: that is FreeSWITCH's silence
     /// before playback and the comfort-noise frames mod_loopback inserts when the other leg is a
-    /// little late (the counter only reaches -1 after 65535 samples). Returns how many counter
-    /// samples there were.
+    /// little late (the counter only reaches -1 after 65535 samples). Silence after it is where
+    /// the counter ended. Returns how many counter samples there were.
     pub fn assert_counter(samples: &[i16]) -> usize {
         let consecutive = |w: &[i16]| w.windows(2).all(|p| p[1] == p[0].wrapping_add(1));
         let start = samples
@@ -441,11 +482,13 @@ pub mod audio {
                 let head = &samples[..samples.len().min(32)];
                 panic!("no counter in {} samples, starting {head:?}", samples.len())
             });
-        let counter: Vec<i16> = samples[start..]
+        let mut counter: Vec<i16> = samples[start..]
             .iter()
             .copied()
             .filter(|&s| s != -1)
             .collect();
+        let end = counter.iter().rposition(|&s| s != 0).map_or(0, |i| i + 1);
+        counter.truncate(end);
         for (i, pair) in counter.windows(2).enumerate() {
             let around = &counter[i.saturating_sub(10)..(i + 30).min(counter.len())];
             assert_eq!(
@@ -458,13 +501,12 @@ pub mod audio {
         counter.len()
     }
 
-    /// The dominant frequency, from the zero crossings after the leading silence.
+    /// The dominant frequency, from the zero crossings between the silence before and after.
     pub fn frequency(samples: &[i16], rate: u32) -> f64 {
-        let start = samples
-            .iter()
-            .position(|&s| s.unsigned_abs() > 1000)
-            .expect("only silence");
-        let tone = &samples[start..];
+        let loud = |s: &i16| s.unsigned_abs() > 1000;
+        let start = samples.iter().position(loud).expect("only silence");
+        let end = samples.iter().rposition(loud).unwrap() + 1;
+        let tone = &samples[start..end];
         let crossings = tone.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count();
         crossings as f64 / 2.0 / (tone.len() as f64 / rate as f64)
     }

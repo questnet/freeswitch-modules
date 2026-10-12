@@ -3,4 +3,5 @@
 
 pub mod api;
 pub mod fork;
+pub mod playout;
 mod socket;

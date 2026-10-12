@@ -17,11 +17,11 @@ use std::{
 
 use audio_fork::{
     api::{self, Action, ParseError, Start},
-    fork::{Config, Fork, ForkHandle, ForkId, Resample, SUBCLASSES, Timeouts},
+    fork::{Config, Fork, ForkHandle, ForkId, Resample, Resamplers, SUBCLASSES, Timeouts},
 };
 use freeswitch::{
-    MediaBug, ModuleInterface, SMBF_READ_STREAM, SMBF_STEREO, SMBF_WRITE_STREAM, STATUS_SUCCESS,
-    Session, Status, Stream, sys,
+    MediaBug, ModuleInterface, SMBF_READ_STREAM, SMBF_STEREO, SMBF_WRITE_REPLACE,
+    SMBF_WRITE_STREAM, STATUS_SUCCESS, Session, Status, Stream, sys,
 };
 use tokio::runtime::Runtime;
 
@@ -191,15 +191,21 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
         codec_rate,
         rate: start.rate,
         metadata: start.metadata.clone(),
+        playout_rate: start.playout.map(|p| p.rate),
         timeouts: Timeouts::default(),
     };
-    let resampler = (codec_rate != start.rate).then(|| {
-        Box::new(FsResampler(freeswitch::Resampler::new(
-            codec_rate, start.rate, channels,
-        ))) as Box<dyn Resample>
-    });
+    let resampler = |from: u32, to: u32, channels: usize| {
+        (from != to).then(|| {
+            Box::new(FsResampler(freeswitch::Resampler::new(from, to, channels)))
+                as Box<dyn Resample>
+        })
+    };
+    let resamplers = Resamplers {
+        capture: resampler(codec_rate, start.rate, channels),
+        playout: start.playout.and_then(|p| resampler(p.rate, codec_rate, 1)),
+    };
     let runtime = RUNTIME.lock().unwrap().as_ref().unwrap().handle().clone();
-    let (media, handle) = Fork::start(config, Arc::new(FsHost), resampler, &runtime)
+    let (media, handle) = Fork::start(config, Arc::new(FsHost), resamplers, &runtime)
         .map_err(|e| format!("{id}: metadata: {e}"))?;
 
     let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
@@ -228,6 +234,9 @@ fn start_fork(session: &Session, uuid: &str, start: Start) -> Result<(), String>
     }
     if channels == 2 {
         flags |= SMBF_STEREO;
+    }
+    if start.playout.is_some() {
+        flags |= SMBF_WRITE_REPLACE;
     }
     let data = Box::into_raw(Box::new(BugData {
         media,

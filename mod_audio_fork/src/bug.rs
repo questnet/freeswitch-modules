@@ -3,7 +3,7 @@
 use std::ffi::c_void;
 
 use audio_fork::fork::{ForkId, MediaSide};
-use freeswitch::{ABC_CLOSE, ABC_READ, FALSE, MediaBug, TRUE, sys};
+use freeswitch::{ABC_CLOSE, ABC_READ, ABC_WRITE_REPLACE, FALSE, MediaBug, TRUE, sys};
 
 /// The bug's user data, from `start` until CLOSE.
 #[derive(Debug)]
@@ -25,6 +25,12 @@ pub unsafe extern "C" fn callback(
         ABC_READ => {
             let data = unsafe { &mut *data };
             unsafe { MediaBug::from_raw(bug) }.read_frames(|samples| data.media.on_read(samples));
+            TRUE
+        }
+        ABC_WRITE_REPLACE => {
+            let data = unsafe { &mut *data };
+            unsafe { MediaBug::from_raw(bug) }
+                .replace_write_frame(|frame| data.media.on_write_replace(frame));
             TRUE
         }
         ABC_CLOSE => {

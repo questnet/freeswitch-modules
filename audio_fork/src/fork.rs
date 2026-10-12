@@ -21,7 +21,10 @@ use tokio::{runtime::Handle, sync::Notify};
 use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_util::sync::CancellationToken;
 
-use crate::socket;
+use crate::{
+    playout::{Playout, Prebuffer},
+    socket,
+};
 
 /// The custom events a fork fires (all `SWITCH_EVENT_CUSTOM`, reserved on load).
 pub const SUBCLASSES: [&CStr; 7] = [
@@ -117,7 +120,27 @@ pub struct Config {
     /// The rate audio is sent to the server at.
     pub rate: u32,
     pub metadata: Option<String>,
+    /// The rate the server sends audio at, when it is played to the caller (write-replace).
+    pub playout_rate: Option<u32>,
     pub timeouts: Timeouts,
+}
+
+/// Resamplers from the host, each `None` where the rates match.
+#[derive(Default)]
+pub struct Resamplers {
+    /// Codec rate to the rate sent to the server, interleaved for stereo.
+    pub capture: Option<Box<dyn Resample>>,
+    /// Server rate to the codec rate, mono.
+    pub playout: Option<Box<dyn Resample>>,
+}
+
+impl fmt::Debug for Resamplers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Resamplers")
+            .field("capture", &self.capture.is_some())
+            .field("playout", &self.playout.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -166,6 +189,8 @@ pub(crate) struct Shared {
     pub streaming: AtomicBool,
     /// Cancelled at CLOSE; the task then flushes texts, sends the close frame and ends.
     pub closed: CancellationToken,
+    /// Present when server audio is played to the caller.
+    pub playout: Option<Playout>,
 }
 
 #[derive(Debug, Default)]
@@ -213,7 +238,7 @@ impl Fork {
     pub fn start(
         config: Config,
         host: Arc<dyn Host>,
-        resampler: Option<Box<dyn Resample>>,
+        resamplers: Resamplers,
         runtime: &Handle,
     ) -> Result<(MediaSide, ForkHandle), TextError> {
         let mut outbox = Outbox::default();
@@ -226,16 +251,27 @@ impl Fork {
             wake: Notify::new(),
             streaming: AtomicBool::new(false),
             closed: CancellationToken::new(),
+            playout: config.playout_rate.map(|_| Playout::default()),
+        });
+        let inbound = config.playout_rate.map(|rate| socket::Inbound {
+            prebuffer: Prebuffer::new(rate, config.codec_rate),
+            resampler: resamplers.playout,
         });
         let capacity = config.rate as usize * config.channels * CAPTURE_BUFFER_SECS;
         let (producer, consumer) = RingBuffer::new(capacity);
-        runtime.spawn(socket::run(config, shared.clone(), host.clone(), consumer));
+        runtime.spawn(socket::run(
+            config,
+            shared.clone(),
+            host.clone(),
+            consumer,
+            inbound,
+        ));
         let media = MediaSide {
             shared: shared.clone(),
             host,
             runtime: runtime.clone(),
             capture: producer,
-            resampler,
+            resampler: resamplers.capture,
             resampled: Vec::new(),
             overrun_notified: false,
         };
@@ -296,6 +332,17 @@ impl MediaSide {
         let (host, id) = (self.host.clone(), self.shared.id.clone());
         self.runtime
             .spawn(async move { host.fire(&id, Event::BufferOverrun) });
+    }
+
+    /// Mixes server audio into a frame going to the caller; returns whether it changed the frame.
+    /// Only with playout, whose write-replace bug is the only caller.
+    pub fn on_write_replace(&mut self, frame: &mut [i16]) -> bool {
+        let playout = self
+            .shared
+            .playout
+            .as_ref()
+            .expect("write-replace without playout");
+        playout.mix_into(frame)
     }
 
     /// The bug's CLOSE: the task sends what is queued, closes the socket and ends.

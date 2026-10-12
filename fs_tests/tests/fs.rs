@@ -1,5 +1,7 @@
 //! Real-FreeSWITCH scenarios (docs/testing-plan.md#scenarios). Run in the fs-test image by `just test-fs`.
 
+use std::time::Duration;
+
 use fs_tests::{
     Exception, FreeSwitch, Scenario,
     audio::{assert_counter, channel, frequency, samples},
@@ -15,6 +17,10 @@ fn main() {
         ("events", |fs| Box::pin(events(fs))),
         ("inbound", |fs| Box::pin(inbound(fs))),
         ("receive_limit", |fs| Box::pin(receive_limit(fs))),
+        ("bidi_playout", |fs| Box::pin(bidi_playout(fs))),
+        ("bidi_resampled", |fs| Box::pin(bidi_playout_resampled(fs))),
+        ("kill_audio", |fs| Box::pin(kill_audio(fs))),
+        ("playback_mode", |fs| Box::pin(playback_mode(fs))),
     ];
     fs_tests::run(scenarios);
 }
@@ -246,5 +252,125 @@ async fn receive_limit(fs: &FreeSwitch) {
         fs.event(&call.a, "big", "mod_audio_fork::disconnect").await;
     }
     call.fork("stop big").await;
+    call.hangup().await;
+}
+
+/// Streams `seconds` of the running counter (from 1) in frames that split samples.
+fn send_counter(conn: &test_server::Conn, rate: u32, seconds: u32) {
+    let bytes: Vec<u8> = (1..=rate * seconds)
+        .flat_map(|i| (i as i16).to_le_bytes())
+        .collect();
+    for chunk in bytes.chunks(333) {
+        conn.send_binary(chunk.to_vec());
+    }
+}
+
+/// Server audio is played to the caller unchanged (no resampling at matching rates).
+async fn bidi_playout(fs: &FreeSwitch) {
+    for rate in [8000, 16000] {
+        let mut server = Server::start().await;
+        let call = fs.call(rate).await;
+        call.play_silence_to_a().await;
+        let recording = call.record_b().await;
+        call.fork(&format!(
+            "start {} mono {rate} pb {{}} true true {rate}",
+            server.url("/")
+        ))
+        .await;
+        let conn = server.accept().await;
+        send_counter(&conn, rate, 2);
+        tokio::time::sleep(Duration::from_millis(2600)).await;
+        let played = call.recorded_b(&recording).await;
+        let n = assert_counter(&played);
+        assert!(
+            n >= rate as usize * 3 / 2,
+            "{rate} Hz: only {n} samples played"
+        );
+        call.fork("stop pb").await;
+        call.hangup().await;
+    }
+}
+
+/// A 16 kHz stream played into an 8 kHz call keeps its frequency.
+async fn bidi_playout_resampled(fs: &FreeSwitch) {
+    let mut server = Server::start().await;
+    let call = fs.call(8000).await;
+    call.play_silence_to_a().await;
+    let recording = call.record_b().await;
+    call.fork(&format!(
+        "start {} mono 8k pr {{}} true true 16000",
+        server.url("/")
+    ))
+    .await;
+    let conn = server.accept().await;
+    let tone: Vec<u8> = (0..32000)
+        .map(|i| (8000.0 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 16000.0).sin()) as i16)
+        .flat_map(|s| s.to_le_bytes())
+        .collect();
+    for chunk in tone.chunks(640) {
+        conn.send_binary(chunk.to_vec());
+    }
+    tokio::time::sleep(Duration::from_millis(2600)).await;
+    let played = call.recorded_b(&recording).await;
+    let hz = frequency(&played, 8000);
+    assert!((950.0..1050.0).contains(&hz), "played at {hz} Hz");
+    call.fork("stop pr").await;
+    call.hangup().await;
+}
+
+/// killAudio stops the playout and interrupts what leg A plays.
+async fn kill_audio(fs: &FreeSwitch) {
+    let mut server = Server::start().await;
+    let call = fs.call(8000).await;
+    call.play_silence_to_a().await;
+    let recording = call.record_b().await;
+    call.fork(&format!(
+        "start {} mono 8k ka {{}} true true 8000",
+        server.url("/")
+    ))
+    .await;
+    let conn = server.accept().await;
+    send_counter(&conn, 8000, 5);
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let interrupted = |fs: &FreeSwitch| {
+        fs.events_all(&call.a).iter().any(|e| {
+            e.subclass == "CHANNEL_EXECUTE_COMPLETE" && e.application.as_deref() == Some("playback")
+        })
+    };
+    assert!(!interrupted(fs), "the endless silence ended by itself");
+    conn.send_text(r#"{"type":"killAudio"}"#);
+    fs.event(&call.a, "ka", "mod_audio_fork::kill_audio").await;
+    // the endless silence leg A plays can only complete when it is interrupted
+    fs.event(&call.a, "", "CHANNEL_EXECUTE_COMPLETE").await;
+    assert!(interrupted(fs), "playback not interrupted");
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let played = assert_counter(&call.recorded_b(&recording).await);
+    assert!(
+        played < 8000 * 2,
+        "{played} samples played, killAudio came after about 8000"
+    );
+    call.fork("stop ka").await;
+    call.hangup().await;
+}
+
+/// `playback`: server audio is played, the caller's is not sent.
+async fn playback_mode(fs: &FreeSwitch) {
+    let mut server = Server::start().await;
+    let call = fs.call(8000).await;
+    call.play_silence_to_a().await;
+    call.play_counter().await;
+    let recording = call.record_b().await;
+    call.fork(&format!(
+        "start {} mono 8k po {{}} playback true 8000",
+        server.url("/")
+    ))
+    .await;
+    let mut conn = server.accept().await;
+    send_counter(&conn, 8000, 2);
+    assert_eq!(conn.next().await, Some(Frame::Text("{}".to_string())));
+    let sent = tokio::time::timeout(Duration::from_millis(2500), conn.next()).await;
+    assert!(sent.is_err(), "the server got {sent:?}");
+    assert!(assert_counter(&call.recorded_b(&recording).await) >= 8000 * 3 / 2);
+    call.fork("stop po").await;
     call.hangup().await;
 }
