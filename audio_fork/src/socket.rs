@@ -53,7 +53,7 @@ pub(crate) async fn run(
         _ = shared.closed.cancelled() => {
             // hung up or stopped while connecting: the connection attempt is dropped, nothing is sent
             tracing::debug!(session = %id.session, "{id}: closed while connecting");
-            shared.outbox.lock().phase = Phase::Ended;
+            shared.state.lock().phase = Phase::Ended;
             return;
         }
         connected = tokio::time::timeout(config.timeouts.connect, connect(&config.url)) => connected,
@@ -66,11 +66,11 @@ pub(crate) async fn run(
     if shared.closed.is_cancelled() {
         // closed just as the handshake completed: nothing is sent, not even the queued texts
         tracing::debug!(session = %id.session, "{id}: closed while connecting");
-        shared.outbox.lock().phase = Phase::Ended;
+        shared.state.lock().phase = Phase::Ended;
         let _ = tokio::time::timeout(config.timeouts.close, socket.close(None)).await;
         return;
     }
-    shared.outbox.lock().phase = Phase::Open;
+    shared.state.lock().phase = Phase::Open;
     shared.streaming.store(true, Ordering::Release);
     tracing::info!(session = %id.session, "{id}: connected to {}", config.url);
     shared.fire(&*host, Event::Connect);
@@ -81,7 +81,7 @@ pub(crate) async fn run(
         End::Closed => {
             let flushed =
                 tokio::time::timeout(config.timeouts.close, close(&mut socket, &shared)).await;
-            shared.outbox.lock().phase = Phase::Ended;
+            shared.state.lock().phase = Phase::Ended;
             match flushed {
                 Ok(Ok(())) => tracing::debug!(session = %id.session, "{id}: closed"),
                 Ok(Err(e)) => {
@@ -91,7 +91,7 @@ pub(crate) async fn run(
             }
         }
         End::Dropped(reason) => {
-            shared.outbox.lock().phase = Phase::Ended;
+            shared.state.lock().phase = Phase::Ended;
             tracing::info!(session = %id.session, "{id}: connection dropped: {reason}");
             shared.fire(&*host, Event::Disconnect(None));
         }
@@ -114,7 +114,7 @@ async fn connect(url: &Uri) -> Result<Socket, tungstenite::Error> {
 
 fn connect_failed(shared: &Shared, host: &dyn Host, reason: String) {
     let id = &shared.id;
-    shared.outbox.lock().phase = Phase::Ended;
+    shared.state.lock().phase = Phase::Ended;
     tracing::info!(session = %id.session, "{id}: connection failed: {reason}");
     shared.fire(host, Event::ConnectFailed { reason });
 }
@@ -129,7 +129,7 @@ async fn stream(
 ) -> End {
     loop {
         loop {
-            let Some(text) = shared.outbox.lock().pop() else {
+            let Some(text) = shared.state.lock().pop() else {
                 break;
             };
             if let Err(end) = send(socket, shared, Message::text(text)).await {
@@ -243,7 +243,7 @@ fn parse(text: &str) -> Request {
 /// After CLOSE: the texts still queued (a final `stop` text among them), then the close frame.
 async fn close(socket: &mut Socket, shared: &Shared) -> Result<(), tungstenite::Error> {
     loop {
-        let Some(text) = shared.outbox.lock().pop() else {
+        let Some(text) = shared.state.lock().pop() else {
             break;
         };
         socket.send(Message::text(text)).await?;

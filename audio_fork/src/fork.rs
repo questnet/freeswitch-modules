@@ -186,12 +186,12 @@ impl fmt::Display for TextError {
 #[derive(Debug)]
 pub(crate) struct Shared {
     pub id: ForkId,
-    pub outbox: Mutex<Outbox>,
+    pub state: Mutex<State>,
     /// Wakes the task: a frame was pushed, a text queued, or the fork is closing.
     pub wake: Notify,
     /// Set by the task while frames can be sent; the media side drops frames otherwise, as there is nobody to send them to.
     pub streaming: AtomicBool,
-    /// Cancelled at CLOSE; the task then flushes texts, sends the close frame and ends.
+    /// Cancelled at CLOSE, under the state lock; the task then flushes texts, sends the close frame and ends, and no event fires any more.
     pub closed: CancellationToken,
     /// Present when server audio is played to the caller.
     pub playout: Option<Playout>,
@@ -200,17 +200,13 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    /// Fires unless CLOSE ran. Under the outbox lock, which CLOSE takes too, so no event can follow it.
+    /// Fires unless CLOSE ran. Under the state lock, which CLOSE takes too, so no event can follow it.
     pub fn fire(&self, host: &dyn Host, event: Event) {
-        let outbox = self.outbox.lock();
-        if !outbox.closed {
+        let state = self.state.lock();
+        if !self.closed.is_cancelled() {
             host.fire(&self.id, event);
         }
-        drop(outbox);
-    }
-
-    pub fn is_closed(&self) -> bool {
-        self.outbox.lock().closed
+        drop(state);
     }
 }
 
@@ -231,15 +227,14 @@ pub enum PanicIn {
     Task,
 }
 
+/// The fork's lifecycle and the texts waiting to be sent, under one lock: whether a text is accepted depends on the phase.
 #[derive(Debug, Default)]
-pub(crate) struct Outbox {
+pub(crate) struct State {
     pub phase: Phase,
     pub texts: VecDeque<String>,
     pub bytes: usize,
     /// No more texts are accepted: `stop` was called or CLOSE ran.
     pub closing: bool,
-    /// CLOSE ran: the fork fires no more events.
-    pub closed: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -250,7 +245,7 @@ pub(crate) enum Phase {
     Ended,
 }
 
-impl Outbox {
+impl State {
     fn push(&mut self, text: String) -> Result<(), TextError> {
         if text.len() > MAX_TEXT_LEN {
             return Err(TextError::TooLong);
@@ -281,13 +276,13 @@ impl Fork {
         resamplers: Resamplers,
         runtime: &Handle,
     ) -> Result<(MediaSide, ForkHandle), TextError> {
-        let mut outbox = Outbox::default();
+        let mut state = State::default();
         if let Some(metadata) = config.metadata.clone() {
-            outbox.push(metadata)?;
+            state.push(metadata)?;
         }
         let shared = Arc::new(Shared {
             id: config.id.clone(),
-            outbox: Mutex::new(outbox),
+            state: Mutex::new(state),
             wake: Notify::new(),
             streaming: AtomicBool::new(false),
             closed: CancellationToken::new(),
@@ -333,7 +328,7 @@ async fn supervise(task: JoinHandle<()>, shared: Arc<Shared>, host: Arc<dyn Host
     let id = &shared.id;
     tracing::error!(target: "panic", session = %id.session, "{id}: socket task panicked: {message}");
     shared.fire(&*host, panic_event(&message));
-    if !shared.is_closed() {
+    if !shared.closed.is_cancelled() {
         host.end(id);
     }
 }
@@ -431,11 +426,11 @@ impl MediaSide {
 
     /// The bug's CLOSE: the task sends what is queued, closes the socket and ends.
     pub fn close(self) {
-        let mut outbox = self.shared.outbox.lock();
-        outbox.closing = true;
-        outbox.closed = true;
-        drop(outbox);
+        let mut state = self.shared.state.lock();
+        state.closing = true;
+        // under the lock, which `Shared::fire` holds while it checks the token
         self.shared.closed.cancel();
+        drop(state);
     }
 }
 
@@ -458,12 +453,12 @@ impl ForkHandle {
 
     /// Queues one text frame; texts sent before the connection is open go out right after the metadata.
     pub fn send_text(&self, text: String) -> Result<(), TextError> {
-        let mut outbox = self.shared.outbox.lock();
-        if outbox.closing || outbox.phase == Phase::Ended {
+        let mut state = self.shared.state.lock();
+        if state.closing || state.phase == Phase::Ended {
             return Err(TextError::NotOpen);
         }
-        outbox.push(text)?;
-        drop(outbox);
+        state.push(text)?;
+        drop(state);
         self.shared.wake.notify_one();
         Ok(())
     }
@@ -471,15 +466,15 @@ impl ForkHandle {
     /// Accepts no more texts; `text` is the last frame before the close, if the connection is open.
     /// The fork ends when the host removes the bug (CLOSE).
     pub fn stop(&self, text: Option<String>) {
-        let mut outbox = self.shared.outbox.lock();
-        if let Some(text) = text.filter(|_| outbox.phase == Phase::Open && !outbox.closing) {
+        let mut state = self.shared.state.lock();
+        if let Some(text) = text.filter(|_| state.phase == Phase::Open && !state.closing) {
             // the connection closes right after; a final text over the limits is dropped like one sent too late
-            if let Err(e) = outbox.push(text) {
+            if let Err(e) = state.push(text) {
                 tracing::warn!(session = %self.shared.id.session, "{}: final text not sent: {e}", self.shared.id);
             }
         }
-        outbox.closing = true;
-        drop(outbox);
+        state.closing = true;
+        drop(state);
         self.shared.wake.notify_one();
     }
 }
