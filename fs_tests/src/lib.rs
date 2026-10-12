@@ -3,23 +3,19 @@
 //! One FreeSWITCH process per run, configured from `tests/fs-conf` and pointed at a mod dir that
 //! holds the stock modules plus only the mod_audio_fork variant under test (`AUDIO_FORK_MODULE`).
 
-use std::{
-    env, fs,
-    future::Future,
-    panic::AssertUnwindSafe,
-    path::{Path, PathBuf},
-    pin::Pin,
-    process::Stdio,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::{env, fs};
 
 use freeswitch_esl_tokio::{EslClient, EslEventStream, EventFormat};
 use futures_util::FutureExt;
-use tokio::{
-    process::{Child, Command},
-    sync::Notify,
-};
+use tokio::process::{Child, Command};
+use tokio::sync::Notify;
 
 /// Which build of the module a run loads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

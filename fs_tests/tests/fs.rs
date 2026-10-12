@@ -2,10 +2,8 @@
 
 use std::time::Duration;
 
-use fs_tests::{
-    FreeSwitch, Needs, Scenario,
-    audio::{assert_counter, channel, frequency, samples},
-};
+use fs_tests::audio::{assert_counter, channel, frequency, samples};
+use fs_tests::{FreeSwitch, Needs, Scenario};
 use test_server::{Frame, Server, Sink};
 
 /// `(name, needs, scenario)` entries, named after their functions.

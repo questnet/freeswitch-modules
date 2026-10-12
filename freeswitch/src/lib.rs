@@ -1,12 +1,10 @@
 //! The parts of the FreeSWITCH core that mod_audio_fork calls (D2): generated bindings in [`sys`]
 //! and a thin safe layer over them.
 
-use std::{
-    any::Any,
-    ffi::{CStr, CString, c_char, c_int, c_void},
-    panic::{AssertUnwindSafe, catch_unwind},
-    ptr,
-};
+use std::any::Any;
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::ptr;
 
 #[allow(
     non_camel_case_types,

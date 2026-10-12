@@ -1,7 +1,8 @@
 //! Load tier (docs/testing-plan.md#load-tier): N calls forking with bidirectional audio for 60 s,
 //! reporting FreeSWITCH's CPU per call, buffer overruns and the playout delay. Run by `just test-load N`.
 
-use std::{env, time::Duration};
+use std::env;
+use std::time::Duration;
 
 use fs_tests::FreeSwitch;
 use test_server::Streamer;

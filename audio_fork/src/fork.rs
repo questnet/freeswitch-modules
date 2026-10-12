@@ -5,28 +5,24 @@
 //! control from API calls. Neither holds a session; the task reaches the host only through
 //! [`Host`], keyed by session UUID, so a hung-up call simply makes those calls no-ops.
 
-use std::{
-    any::Any,
-    collections::VecDeque,
-    ffi::CStr,
-    fmt,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::any::Any;
+use std::collections::VecDeque;
+use std::ffi::CStr;
+use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use rtrb::{Producer, RingBuffer};
-use tokio::{runtime::Handle, sync::Notify, task::JoinHandle};
+use tokio::runtime::Handle;
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    playout::{Playout, Prebuffer},
-    socket,
-};
+use crate::playout::{Playout, Prebuffer};
+use crate::socket;
 
 /// The custom events a fork fires (all `SWITCH_EVENT_CUSTOM`, reserved on load).
 pub const SUBCLASSES: [&CStr; 7] = [

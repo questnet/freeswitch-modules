@@ -1,26 +1,21 @@
 //! The socket task of one fork: connect, send the metadata, queued texts and capture audio,
 //! receive, and close at CLOSE.
 
-use std::sync::{Arc, OnceLock, atomic::Ordering};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
 
 use futures_util::{SinkExt, StreamExt};
 use rtrb::Consumer;
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    Connector, MaybeTlsStream, WebSocketStream,
-    tungstenite::{
-        self, Message,
-        client::IntoClientRequest,
-        http::{HeaderValue, Uri},
-        protocol::WebSocketConfig,
-    },
-};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{HeaderValue, Uri};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::{self, Message};
+use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
-use crate::{
-    fork::{Config, Event, Host, MAX_TEXT_LEN, Phase, Resample, Shared},
-    playout::Prebuffer,
-};
+use crate::fork::{Config, Event, Host, MAX_TEXT_LEN, Phase, Resample, Shared};
+use crate::playout::Prebuffer;
 
 const SUBPROTOCOL: &str = "audio.drachtio.org";
 

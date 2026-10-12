@@ -5,19 +5,15 @@ mod bug;
 mod host;
 mod log;
 
-use std::{
-    collections::HashMap,
-    ffi::{CStr, c_char, c_void},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::ffi::{CStr, c_char, c_void};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-use audio_fork::{
-    api::{self, Action, ParseError, Start},
-    fork::{Config, Fork, ForkHandle, ForkId, Resample, Resamplers, SUBCLASSES, Timeouts},
+use audio_fork::api::{self, Action, ParseError, Start};
+use audio_fork::fork::{
+    Config, Fork, ForkHandle, ForkId, Resample, Resamplers, SUBCLASSES, Timeouts,
 };
 use freeswitch::{
     MediaBug, ModuleInterface, SMBF_READ_STREAM, SMBF_STEREO, SMBF_WRITE_REPLACE,
@@ -26,10 +22,8 @@ use freeswitch::{
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use tokio::runtime::Runtime;
 
-use crate::{
-    bug::BugData,
-    host::{FsHost, FsResampler},
-};
+use crate::bug::BugData;
+use crate::host::{FsHost, FsResampler};
 
 const SYNTAX: &CStr = c"<uuid> [start | stop | send_text] [ws-url] [mono | mixed | stereo] [8k | 16k | <rate>] [bugname] [metadata] [true | playback] [true] [bidirectional sample rate]";
 const OK: &str = "+OK Success\n";

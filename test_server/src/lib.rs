@@ -2,27 +2,19 @@
 //! handshake, so it can accept, delay or refuse it, and then records what the client sends and
 //! does what the test tells it (send, stall, close, drop the TCP connection).
 
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::mpsc,
-};
-use tokio_tungstenite::tungstenite::{
-    Message,
-    handshake::server::{Request, Response},
-    http::HeaderValue,
-    protocol::WebSocketConfig,
-};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 #[derive(Debug)]
 pub struct Server {

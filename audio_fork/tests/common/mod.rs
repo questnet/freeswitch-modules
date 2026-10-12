@@ -2,10 +2,8 @@
 
 #![allow(dead_code)]
 
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use audio_fork::fork::{
     Config, Event, Fork, ForkHandle, ForkId, Host, MediaSide, Resamplers, Timeouts,
