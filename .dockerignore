@@ -1,1 +1,4 @@
 .git
+/target
+/.deps
+/.cargo

@@ -2,6 +2,8 @@
 
 Repositories to check from time to time for features and fixes that may affect our `mod_audio_fork`. We only carry `mod_audio_fork`; ignore changes to other modules.
 
+Our module is a Rust rewrite now ([docs/rust-rebuild-plan.md](../docs/rust-rebuild-plan.md)), so upstream fixes to the C/C++ internals no longer apply; what is worth watching is the protocol: messages, events, API arguments and audio behaviour.
+
 Remotes in this clone: `origin` (questnet), `upstream` (lylepratt). The others are not configured by default:
 `git remote add acclaim https://github.com/acclaim-ai/freeswitch-modules.git`
 
@@ -22,9 +24,9 @@ and read the diffs of anything new. Update the "last checked" line below.
 
 Not taken yet:
 
-- [ ] `stop_play <uuid> <bugname>` (0f0624a, `vux-63-add-silerovad…`): one line, `if (argc > 2) bugname = argv[2];`. Our `mod_audio_fork.c` still always uses the default bug name.
+- [x] ~~`stop_play <uuid> <bugname>` (0f0624a, `vux-63-add-silerovad…`)~~: obsolete, `stop_play` was dropped in the Rust rewrite (D1).
 - [ ] Lower streaming prebuffer, 160/80 ms to 80/20 ms (07143fc, `sip-179-ws2grpc-120ms-latency`): latency vs underrun trade-off, test with jitter first.
-- [ ] `fix-locked-thread-leak`: check that our connect-failure and `switch_core_media_bug_add` failure paths free the pipe (they delete the `AudioPipe` on `CONNECTION_ERROR`, on synchronous `lws_client_connect_via_info` failure, and call `fork_session_destroy()` on `bug_add` failure). The rest is already covered by our `robustness-fixes` rework.
+- [x] ~~`fix-locked-thread-leak`~~: obsolete, it is about the C internals.
 
 Deliberately skipped: raw OPUS over the WebSocket (255fb5f / 43105e1, changes the wire protocol), standalone Makefile (Docker build covers it), `mod_vad_silero`, `mod_aws_transcribe_ws`, leak-hunting log instrumentation, 2024 jambonz commits for other modules.
 
@@ -32,9 +34,9 @@ Deliberately skipped: raw OPUS over the WebSocket (255fb5f / 43105e1, changes th
 
 Most of it is already covered by our `robustness-fixes` work (null checks, cleanup locking, termination, exceptions, connect-failure cleanup). Not taken yet:
 
-- [ ] Receive buffer as `std::vector` plus an overflow flag (`refactor/architecture-improvements`, 17e5fa5 / 8ea5344): discards the remaining fragments of an oversized message. Would close the two open Medium items on the first fragment allocation and the oversized tail in `review-findings.md`.
+- [x] ~~Receive buffer as `std::vector` plus an overflow flag (`refactor/architecture-improvements`, 17e5fa5 / 8ea5344)~~: the Rust rewrite closes the connection on messages over 1 MB instead.
 - [ ] `{"type":"hangup"}` message hangs up the channel with NORMAL_CLEARING and fires `mod_audio_fork::hangup` (`fix/code-review-bugfixes`, a65a94f). Only new feature; lets the remote end terminate calls, so decide first whether we want it.
-- [ ] Reserve and free the missing event subclasses (`CONNECT_SUCCESS`, `CONNECT_FAIL`, `BUFFER_OVERRUN`, `JSON`): matches a Low item in `review-findings.md`.
+- [x] ~~Reserve and free the missing event subclasses~~: done in the Rust rewrite.
 
 Deliberately skipped: `std::vector` audio buffer (conflicts with our `shared_ptr` ownership), locking around `pAudioPipe = nullptr` (covered by `PipeHandle`), removal of the duplicate `else if` branches (dead code, already gone here).
 
